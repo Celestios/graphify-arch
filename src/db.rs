@@ -1,5 +1,7 @@
 use crate::schema::{AstNodeType, CodeNode, SemanticFacets, UnresolvedRelation, EdgeType, OntologyConfig};
+use byteorder::{LittleEndian, ReadBytesExt};
 use rusqlite::{params, Connection, Result};
+use std::io::Cursor;
 use std::collections::HashMap;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;
@@ -24,12 +26,14 @@ impl Database {
                 ast_hash TEXT NOT NULL,
                 semantics TEXT NOT NULL,
                 ai_summary TEXT,
+                embedding BLOB,
                 raw_code TEXT NOT NULL DEFAULT '',
                 previous_code TEXT,
                 is_dirty INTEGER NOT NULL
             )",
             [],
         )?;
+        let _ = conn.execute("ALTER TABLE nodes ADD COLUMN embedding BLOB", []);
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS edges (
@@ -633,22 +637,20 @@ impl Database {
         pattern: Option<String>,
         purity: Option<String>,
         purity_barrier: Option<bool>,
+        embedding_bytes: Option<Vec<u8>>,
     ) -> Result<()> {
         let mut stmt = self.conn.prepare("SELECT semantics, ai_summary FROM nodes WHERE id = ?")?;
         let mut rows = stmt.query(params![id])?;
         
-        let (mut semantics, mut current_summary) = if let Some(row) = rows.next()? {
+        let (mut semantics, mut current_summary, mut current_embedding) = if let Some(row) = rows.next()? {
             let s_json: String = row.get(0)?;
             let s: SemanticFacets = serde_json::from_str(&s_json).unwrap_or_else(|_| SemanticFacets::default());
             let sum: Option<String> = row.get(1)?;
-            (s, sum)
+            let emb: Option<Vec<u8>> = row.get(2)?;
+            (s, sum, emb)
         } else {
             return Ok(());
         };
-
-        if let Some(s) = summary {
-            current_summary = Some(s);
-        }
         if let Some(l) = layer {
             semantics.layer = l;
         }
@@ -668,8 +670,8 @@ impl Database {
         let semantics_json = serde_json::to_string(&semantics).unwrap_or_default();
 
         self.conn.execute(
-            "UPDATE nodes SET semantics = ?1, ai_summary = ?2, is_dirty = 0 WHERE id = ?3",
-            params![semantics_json, current_summary, id],
+            "UPDATE nodes SET semantics = ?1, ai_summary = ?2, embedding = ?3, is_dirty = 0 WHERE id = ?4",
+            params![semantics_json, current_summary, current_embedding, id],
         )?;
 
         Ok(())
@@ -932,6 +934,62 @@ impl Database {
 
         Ok(serde_json::json!({
             "query": query,
+            "count": results.len(),
+            "results": results,
+        }))
+    }
+
+    pub fn semantic_vector_search(&self, query_embedding: &[f32], limit: usize) -> Result<serde_json::Value> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, filepath, node_type, ai_summary, embedding 
+             FROM nodes WHERE embedding IS NOT NULL",
+        )?;
+
+        let mut rows = stmt.query([])?;
+        let mut scored_nodes = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let filepath: String = row.get(1)?;
+            let node_type: String = row.get(2)?;
+            let summary: Option<String> = row.get(3)?;
+            let blob: Vec<u8> = row.get(4)?;
+
+            let mut cursor = Cursor::new(blob);
+            let mut node_emb = Vec::with_capacity(768);
+            while let Ok(f) = cursor.read_f32::<LittleEndian>() {
+                node_emb.push(f);
+            }
+
+            let mut similarity: f32 = 0.0;
+            let len = std::cmp::min(query_embedding.len(), node_emb.len());
+            for i in 0..len {
+                similarity += query_embedding[i] * node_emb[i];
+            }
+
+            scored_nodes.push((
+                similarity,
+                id,
+                filepath,
+                node_type,
+                summary.unwrap_or_default(),
+            ));
+        }
+
+        scored_nodes.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
+        let mut results = Vec::new();
+        for (score, id, filepath, n_type, summary) in scored_nodes.into_iter().take(limit) {
+            results.push(serde_json::json!({
+                "score": score,
+                "id": id,
+                "filepath": filepath,
+                "type": n_type,
+                "summary": summary
+            }));
+        }
+
+        Ok(serde_json::json!({
             "count": results.len(),
             "results": results,
         }))

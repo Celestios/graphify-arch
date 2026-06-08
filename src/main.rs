@@ -1,6 +1,7 @@
 mod cli;
 mod compiler;
 mod db;
+mod embedder;
 mod parser;
 mod schema;
 
@@ -8,6 +9,7 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use compiler::ContextCompiler;
 use db::Database;
+use embedder::LocalEmbedder;
 use parser::AstParser;
 use schema::OntologyConfig;
 use std::fs;
@@ -181,7 +183,22 @@ fn main() {
                 }
             }
 
-            match database.update_node_metadata(&id, summary, layer, role, pattern, purity, barrier_opt) {
+            let mut embedding_blob = None;
+            if let Some(ref text) = summary {
+                let embedder = LocalEmbedder::new(".celial/models");
+                if let Ok(embedder) = embedder {
+                    let semantic_payload = format!("Symbol: {}. Summary: {}", id, text);
+                    if let Ok(vector) = embedder.embed(&semantic_payload) {
+                        let mut bytes = Vec::with_capacity(vector.len() * 4);
+                        for f in vector {
+                            bytes.extend_from_slice(&f.to_le_bytes());
+                        }
+                        embedding_blob = Some(bytes);
+                    }
+                }
+            }
+
+            match database.update_node_metadata(&id, summary, layer, role, pattern, purity, barrier_opt, embedding_blob) {
                 Ok(_) => {
                     println!("Successfully updated node state and cleared dirty tracking flags.");
                 }
@@ -192,15 +209,32 @@ fn main() {
             }
         }
         Commands::SemanticSearch { query, limit } => {
-            match database.semantic_search(&query, limit) {
-                Ok(results) => {
-                    println!("{}", serde_json::to_string_pretty(&results).unwrap());
+            let embedder = LocalEmbedder::new(".celial/models");
+            let results = if let Ok(embedder) = embedder {
+                let query_vector = match embedder.embed(&query) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("Failed to embed query: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                match database.semantic_vector_search(&query_vector, limit as usize) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Semantic vector search failed: {:?}", e);
+                        std::process::exit(1);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Semantic search failed: {:?}", e);
-                    std::process::exit(1);
+            } else {
+                match database.semantic_search(&query, limit) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Semantic search failed: {:?}", e);
+                        std::process::exit(1);
+                    }
                 }
-            }
+            };
+            println!("{}", serde_json::to_string_pretty(&results).unwrap());
         }
     }
 }

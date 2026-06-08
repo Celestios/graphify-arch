@@ -14,3 +14,6 @@ tree-sitter-dart = "0.2"
 rusqlite = { version = "0.33.0", features = ["bundled"] }
 petgraph = "0.8.3"
 streaming-iterator = "0.1"
+ort = { version = "2.0.0-rc.2", features = ["load-dynamic"] }
+tokenizers = "0.15"
+byteorder = "1.5"
