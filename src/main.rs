@@ -12,6 +12,7 @@ use parser::AstParser;
 use schema::OntologyConfig;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn load_ontology(path: &str) -> OntologyConfig {
     let content = fs::read_to_string(path).expect("Failed to read ontology configuration");
@@ -88,7 +89,7 @@ fn main() {
             let mut parsed_nodes = Vec::new();
             let mut parsed_relations = Vec::new();
             
-            if let Err(e) = visit_dirs(Path::new(&path), &mut parsed_nodes, &mut parsed_relations) {
+            if let Err(e) = ingest_git_delta(&path, &mut parsed_nodes, &mut parsed_relations) {
                 eprintln!("Scanning error: {:?}", e);
                 return;
             }
@@ -173,11 +174,10 @@ fn main() {
         Commands::UpdateNode { id, summary, layer, role, pattern, purity } => {
             println!("Updating metadata for Node ID: {}", id);
             
-            // Allow programmatic configuration of purity barriers from CLI
             let mut barrier_opt = None;
             if let Some(ref r_val) = role {
                 if r_val == "FfiBridge" {
-                    barrier_opt = Some(true); // Treat FfiBridges as purity barriers [6]
+                    barrier_opt = Some(true);
                 }
             }
 
@@ -191,35 +191,57 @@ fn main() {
                 }
             }
         }
-    }
-}
-
-fn visit_dirs(
-    dir: &Path,
-    all_nodes: &mut Vec<schema::CodeNode>,
-    all_relations: &mut Vec<schema::UnresolvedRelation>,
-) -> std::io::Result<()> {
-    if dir.is_dir() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                visit_dirs(&path, all_nodes, all_relations)?;
-            } else {
-                let path_str = path.to_string_lossy();
-                if path_str.ends_with(".rs") || path_str.ends_with(".dart") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        match AstParser::parse_file(&path_str, &content) {
-                            Ok((mut nodes, mut relations)) => {
-                                all_nodes.append(&mut nodes);
-                                all_relations.append(&mut relations);
-                            }
-                            Err(e) => eprintln!("Parser error on file {}: {}", path_str, e),
-                        }
-                    }
+        Commands::SemanticSearch { query, limit } => {
+            match database.semantic_search(&query, limit) {
+                Ok(results) => {
+                    println!("{}", serde_json::to_string_pretty(&results).unwrap());
+                }
+                Err(e) => {
+                    eprintln!("Semantic search failed: {:?}", e);
+                    std::process::exit(1);
                 }
             }
         }
     }
+}
+
+fn ingest_git_delta(
+    dir: &str,
+    all_nodes: &mut Vec<schema::CodeNode>,
+    all_relations: &mut Vec<schema::UnresolvedRelation>,
+) -> std::io::Result<()> {
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+    if !output.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "git diff failed",
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let path = Path::new(dir).join(line);
+        if !path.exists() {
+            continue;
+        }
+        let path_str = path.to_string_lossy();
+        if path_str.ends_with(".rs") || path_str.ends_with(".dart") {
+            if let Ok(content) = fs::read_to_string(&path) {
+                match AstParser::parse_file(&path_str, &content) {
+                    Ok((mut nodes, mut relations)) => {
+                        all_nodes.append(&mut nodes);
+                        all_relations.append(&mut relations);
+                    }
+                    Err(e) => eprintln!("Parser error on file {}: {}", path_str, e),
+                }
+            }
+        }
+    }
+
     Ok(())
 }

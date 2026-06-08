@@ -71,6 +71,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "streaming-iterator",
  "tree-sitter",
  "tree-sitter-dart",
  "tree-sitter-rust",

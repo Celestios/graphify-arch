@@ -91,6 +91,7 @@ pub struct SemanticFacets {
     pub pattern: String,
     pub purity: String,
     pub purity_barrier: bool,
+    pub event_barrier: bool,
 }
 
 impl SemanticFacets {
@@ -101,6 +102,7 @@ impl SemanticFacets {
             pattern: "None".to_string(),
             purity: config.default_purity.clone(),
             purity_barrier: false,
+            event_barrier: false,
         }
     }
 }
@@ -113,6 +115,7 @@ impl Default for SemanticFacets {
             pattern: "None".to_string(),
             purity: "Unknown".to_string(),
             purity_barrier: false,
+            event_barrier: false,
         }
     }
 }
@@ -129,6 +132,7 @@ pub struct CodeNode {
     pub ai_summary: Option<String>,
     pub raw_code: String,         // Cache raw segment to compare and output context
     pub previous_code: Option<String>, // Tracks deltas to assist agent updates
+    pub previous_ai_summary: Option<String>, // Stores prior summary for delta-driven regeneration [5]
     pub is_dirty: bool,
 }
 
@@ -137,6 +141,8 @@ pub enum EdgeType {
     Contains,
     Calls,
     Implements,
+    FfiBridge,
+    FfiExport,
 }
 
 impl EdgeType {
@@ -145,6 +151,8 @@ impl EdgeType {
             Self::Contains => "Contains",
             Self::Calls => "Calls",
             Self::Implements => "Implements",
+            Self::FfiBridge => "FfiBridge",
+            Self::FfiExport => "FfiExport",
         }
     }
 }
@@ -158,11 +166,21 @@ pub enum UnresolvedRelation {
     Calls { 
         source_id: String, 
         target_symbol: String,
-        caller_filepath: String,            // Added for scope matching heuristics
-        caller_class_symbol: Option<String>, // Added for class-level receiver inference
+        caller_filepath: String,
+        caller_class_symbol: Option<String>,
     },
     Implements { 
         source_id: String, 
         target_symbol: String 
+    },
+    FfiBridge {
+        source_id: String,
+        target_symbol: String,
+        caller_filepath: String,
+        caller_class_symbol: Option<String>,
+    },
+    FfiExport {
+        source_id: String,
+        target_symbol: String,
     },
 }

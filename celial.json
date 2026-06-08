@@ -18,10 +18,22 @@
     "LayoutWidget",
     "Contract",
     "Implementation",
-    "Utility"
+    "Utility",
+    "DataRepository",
+    "FlutterWidget",
+    "GraphCanvas",
+    "Telemetry"
+  ],
+  "patterns": [
+    "FfiBridge",
+    "DataRepository",
+    "FlutterWidget",
+    "GraphCanvas",
+    "Telemetry"
   ],
   "barriers": [
-    "FfiBridge"
+    "FfiBridge",
+    "Telemetry"
   ],
   "rules": [
     {
@@ -53,6 +65,18 @@
       "source_layer": "Tier1Ui",
       "target_layer": "Tier3Domain",
       "message": "UI element triggers mutation logic. Must route via FSM Controllers."
+    },
+    {
+      "name": "FlutterViolation",
+      "source_role": "FlutterWidget",
+      "target_layer": "Tier3Domain",
+      "message": "Flutter widget must not call Rust domain or persistence directly."
+    },
+    {
+      "name": "GraphBoundaryViolation",
+      "source_role": "GraphCanvas",
+      "target_role": "DataRepository",
+      "message": "Graph canvas must not call repository directly."
     }
   ]
 }

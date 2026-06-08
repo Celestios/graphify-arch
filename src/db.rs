@@ -221,6 +221,49 @@ impl Database {
                         }
                     }
                 }
+                UnresolvedRelation::FfiBridge { source_id, target_symbol, caller_filepath, caller_class_symbol } => {
+                    if !existing_node_ids.contains(source_id) { continue; }
+                    if let Some(target_ids) = symbol_to_ids.get(target_symbol) {
+                        if target_ids.is_empty() { continue; }
+                        let resolved_target = if target_ids.len() == 1 {
+                            &target_ids[0]
+                        } else {
+                            let mut best_candidate = &target_ids[0];
+                            let mut high_score = -1;
+                            for candidate in target_ids {
+                                let mut score = 0;
+                                if candidate.contains(caller_filepath) { score += 10; }
+                                if let Some(ref class_sym) = caller_class_symbol {
+                                    if candidate.contains(class_sym) { score += 5; }
+                                }
+                                if score > high_score {
+                                    high_score = score;
+                                    best_candidate = candidate;
+                                }
+                            }
+                            best_candidate
+                        };
+                        if existing_node_ids.contains(resolved_target) {
+                            tx.execute(
+                                "INSERT OR IGNORE INTO edges (source_id, target_id, edge_type) VALUES (?1, ?2, ?3)",
+                                params![source_id, resolved_target, EdgeType::FfiBridge.as_str()],
+                            )?;
+                        }
+                    }
+                }
+                UnresolvedRelation::FfiExport { source_id, target_symbol } => {
+                    if !existing_node_ids.contains(source_id) { continue; }
+                    if let Some(target_ids) = symbol_to_ids.get(target_symbol) {
+                        for target_id in target_ids {
+                            if existing_node_ids.contains(target_id) {
+                                tx.execute(
+                                    "INSERT OR IGNORE INTO edges (source_id, target_id, edge_type) VALUES (?1, ?2, ?3)",
+                                    params![source_id, target_id, EdgeType::FfiExport.as_str()],
+                                )?;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -233,6 +276,9 @@ impl Database {
         let nodes = self.get_all_nodes_internal()?;
         let mut contains_edges = Vec::new();
         let mut calls_edges = Vec::new();
+        let mut impl_edges = Vec::new();
+        let mut ffi_bridge_edges = Vec::new();
+        let mut ffi_export_edges = Vec::new();
 
         {
             let mut stmt = self.conn.prepare("SELECT source_id, target_id, edge_type FROM edges")?;
@@ -241,10 +287,13 @@ impl Database {
                 let source_id: String = row.get(0)?;
                 let target_id: String = row.get(1)?;
                 let edge_type_str: String = row.get(2)?;
-                if edge_type_str == "Contains" {
-                    contains_edges.push((source_id, target_id));
-                } else if edge_type_str == "Calls" {
-                    calls_edges.push((source_id, target_id));
+                match edge_type_str.as_str() {
+                    "Contains" => contains_edges.push((source_id, target_id)),
+                    "Calls" => calls_edges.push((source_id, target_id)),
+                    "Implements" => impl_edges.push((source_id, target_id)),
+                    "FfiBridge" => ffi_bridge_edges.push((source_id, target_id)),
+                    "FfiExport" => ffi_export_edges.push((source_id, target_id)),
+                    _ => {}
                 }
             }
         }
@@ -267,6 +316,24 @@ impl Database {
         for (caller, callee) in calls_edges {
             if let (Some(&caller_idx), Some(&callee_idx)) = (id_map.get(&caller), id_map.get(&callee)) {
                 graph.add_edge(caller_idx, callee_idx, EdgeType::Calls);
+            }
+        }
+
+        for (impl_source, impl_target) in impl_edges {
+            if let (Some(&src_idx), Some(&tgt_idx)) = (id_map.get(&impl_source), id_map.get(&impl_target)) {
+                graph.add_edge(src_idx, tgt_idx, EdgeType::Implements);
+            }
+        }
+
+        for (bridge_source, bridge_target) in ffi_bridge_edges {
+            if let (Some(&src_idx), Some(&tgt_idx)) = (id_map.get(&bridge_source), id_map.get(&bridge_target)) {
+                graph.add_edge(src_idx, tgt_idx, EdgeType::FfiBridge);
+            }
+        }
+
+        for (exp_source, exp_target) in ffi_export_edges {
+            if let (Some(&src_idx), Some(&tgt_idx)) = (id_map.get(&exp_source), id_map.get(&exp_target)) {
+                graph.add_edge(src_idx, tgt_idx, EdgeType::FfiExport);
             }
         }
 
@@ -423,6 +490,7 @@ impl Database {
                 ai_summary,
                 raw_code,
                 previous_code,
+                previous_ai_summary: None,
                 is_dirty,
             }))
         } else {
@@ -543,6 +611,7 @@ impl Database {
                 ai_summary,
                 raw_code,
                 previous_code,
+                previous_ai_summary: None,
                 is_dirty: true,
             });
         }
@@ -619,7 +688,7 @@ impl Database {
         let previous_code: Option<String> = row.get(9)?;
         let is_dirty: bool = row.get::<_, i32>(10)? != 0;
         let semantics: SemanticFacets = serde_json::from_str(&semantics_json).unwrap_or_default();
-        Ok(CodeNode { id, filepath, node_type: AstNodeType::from_str(&node_type_str), start_byte, end_byte, ast_hash, semantics, ai_summary, raw_code, previous_code, is_dirty })
+        Ok(CodeNode { id, filepath, node_type: AstNodeType::from_str(&node_type_str), start_byte, end_byte, ast_hash, semantics, ai_summary, raw_code, previous_code, previous_ai_summary: None, is_dirty })
     }
 
     pub fn query_file(
@@ -766,7 +835,7 @@ impl Database {
     }
 
     pub fn nodes_by_file_like(&self, filepath: &str, pattern: Option<&str>, limit: u32) -> Result<Vec<CodeNode>> {
-        let sql = if let Some(p) = pattern {
+        let sql = if let Some(_p) = pattern {
             format!("SELECT id, filepath, node_type, start_byte, end_byte, ast_hash, semantics, ai_summary, raw_code, previous_code, is_dirty FROM nodes WHERE filepath = ? AND raw_code LIKE ? ORDER BY start_byte LIMIT {}", limit)
         } else {
             format!("SELECT id, filepath, node_type, start_byte, end_byte, ast_hash, semantics, ai_summary, raw_code, previous_code, is_dirty FROM nodes WHERE filepath = ? ORDER BY start_byte LIMIT {}", limit)
@@ -829,11 +898,43 @@ impl Database {
                 ai_summary,
                 raw_code,
                 previous_code,
+                previous_ai_summary: None,
                 is_dirty: false,
             };
             map.insert(id, node);
         }
         Ok(map)
+    }
+
+    pub fn semantic_search(&self, query: &str, limit: u32) -> Result<serde_json::Value> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, filepath, node_type, start_byte, end_byte, ast_hash, semantics, ai_summary, raw_code, previous_code, is_dirty 
+             FROM nodes 
+             WHERE ai_summary IS NOT NULL 
+                OR raw_code LIKE ? 
+             ORDER BY filepath, start_byte 
+             LIMIT ?1",
+        )?;
+        let pattern = format!("%{}%", query);
+        let mut rows = stmt.query(params![limit, pattern])?;
+
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            let node = self.row_to_node(row)?;
+            results.push(serde_json::json!({
+                "id": node.id,
+                "filepath": node.filepath,
+                "type": node.node_type.as_str(),
+                "summary": node.ai_summary,
+                "raw_code": node.raw_code,
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "query": query,
+            "count": results.len(),
+            "results": results,
+        }))
     }
 
     pub fn check_architectural_violations(&self, ontology: &OntologyConfig) -> Result<Vec<Violation>> {

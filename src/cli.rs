@@ -91,4 +91,12 @@ pub enum Commands {
         #[arg(long)]
         purity: Option<String>,
     },
+
+    SemanticSearch {
+        #[arg(long)]
+        query: String,
+
+        #[arg(long, default_value_t = 5)]
+        limit: u32,
+    },
 }
