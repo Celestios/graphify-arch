@@ -3,4 +3,5 @@ dist/
 coverage/
 .DS_Store
 *.log
+.celial_graph.db
 
