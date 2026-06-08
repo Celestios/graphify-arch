@@ -1,0 +1,58 @@
+{
+  "layers": [
+    "Tier1Ui",
+    "Tier2Fsm",
+    "Tier3Domain"
+  ],
+  "default_layer": "Tier3Domain",
+  "purities": {
+    "Unknown": 0,
+    "Pure": 1,
+    "StateMutator": 2,
+    "IoBound": 3
+  },
+  "default_purity": "Unknown",
+  "roles": [
+    "FfiBridge",
+    "StateContainer",
+    "LayoutWidget",
+    "Contract",
+    "Implementation",
+    "Utility"
+  ],
+  "barriers": [
+    "FfiBridge"
+  ],
+  "rules": [
+    {
+      "name": "LayerViolation",
+      "source_layer": "Tier3Domain",
+      "target_layer": "Tier2Fsm",
+      "message": "Forbidden call path: Tier3Domain triggers Tier2Fsm layer."
+    },
+    {
+      "name": "LayerViolation",
+      "source_layer": "Tier3Domain",
+      "target_layer": "Tier1Ui",
+      "message": "Forbidden call path: Tier3Domain triggers Tier1Ui layer."
+    },
+    {
+      "name": "LayerViolation",
+      "source_layer": "Tier2Fsm",
+      "target_layer": "Tier1Ui",
+      "message": "Forbidden call path: Tier2Fsm triggers Tier1Ui layer."
+    },
+    {
+      "name": "DirectStateMutation",
+      "source_layer": "Tier1Ui",
+      "target_purity": "StateMutator",
+      "message": "UI element triggers mutation logic. Must route via FSM Controllers."
+    },
+    {
+      "name": "DirectStateMutation",
+      "source_layer": "Tier1Ui",
+      "target_layer": "Tier3Domain",
+      "message": "UI element triggers mutation logic. Must route via FSM Controllers."
+    }
+  ]
+}
