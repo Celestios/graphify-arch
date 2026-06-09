@@ -1,8 +1,6 @@
-use ort::{
-    GraphOptimizationLevel, Session,
-    session::builder::GraphOptimizationLevel as OptLevel,
-};
-use std::path::Path;
+use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel as OptLevel;
+use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
 pub struct LocalEmbedder {
@@ -11,14 +9,15 @@ pub struct LocalEmbedder {
 }
 
 impl LocalEmbedder {
-    pub fn new(model_dir: &str) -> Result<Self, String> {
-        let model_path = Path::new(model_dir).join("model.onnx");
-        let tokenizer_path = Path::new(model_dir).join("tokenizer.json");
+    pub fn new() -> Result<Self, String> {
+        let home_dir = dirs::home_dir().ok_or("Could not resolve OS home directory")?;
+        let model_dir = home_dir.join(".celial").join("models");
+
+        let model_path = model_dir.join("model.onnx");
+        let tokenizer_path = model_dir.join("tokenizer.json");
 
         if !model_path.exists() || !tokenizer_path.exists() {
-            return Err(
-                "Embedding model not found. Run `arch_indexer setup --download-model`".into(),
-            );
+            return Err(format!("Embedding model missing. Expected at {:?}", model_dir));
         }
 
         let tokenizer = Tokenizer::from_file(tokenizer_path)
@@ -37,8 +36,14 @@ impl LocalEmbedder {
         })
     }
 
-    pub fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
-        let encoding = self.tokenizer.encode(text, true)
+    pub fn embed(&mut self, text: &str) -> Result<Vec<f32>, String> {
+        let mut tokenizer = self.tokenizer.clone();
+        tokenizer.with_truncation(Some(tokenizers::TruncationParams {
+            max_length: 512,
+            ..Default::default()
+        })).map_err(|e| format!("Truncation config failed: {}", e))?;
+
+        let encoding = tokenizer.encode(text, true)
             .map_err(|e| format!("Encoding failed: {}", e))?;
 
         let input_ids = encoding
@@ -53,31 +58,34 @@ impl LocalEmbedder {
             .collect::<Vec<_>>();
 
         let seq_len = input_ids.len();
-        let input_ids_tensor = ort::Value::from_array(
-            ndarray::Array2::from_shape_vec((1, seq_len), input_ids).unwrap(),
-        )
-        .unwrap();
-        let mask_tensor = ort::Value::from_array(
-            ndarray::Array2::from_shape_vec((1, seq_len), attention_mask).unwrap(),
-        )
-        .unwrap();
+
+        let input_ids_tensor = Tensor::from_array(([1usize, seq_len], input_ids))
+            .map_err(|e| e.to_string())?;
+        let mask_tensor = Tensor::from_array(([1usize, seq_len], attention_mask))
+            .map_err(|e| e.to_string())?;
 
         let outputs = self
             .session
             .run(ort::inputs! {
                 "input_ids" => input_ids_tensor,
                 "attention_mask" => mask_tensor,
-            }
-            .unwrap())
+            })
             .map_err(|e| e.to_string())?;
 
-        let embeddings_tensor = outputs["last_hidden_state"].try_extract_tensor::<f32>().unwrap();
-        let embeddings_view = embeddings_tensor.view();
+        let (_, embeddings_data) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?;
+
+        let expected = 1usize * seq_len * 768;
+        if embeddings_data.len() < expected {
+            return Err("Output tensor shorter than expected".into());
+        }
 
         let mut pooled = vec![0.0f32; 768];
         for i in 0..seq_len {
+            let offset = i * 768;
             for d in 0..768 {
-                pooled[d] += embeddings_view[[0, i, d]];
+                pooled[d] += embeddings_data[offset + d];
             }
         }
         for d in 0..768 {

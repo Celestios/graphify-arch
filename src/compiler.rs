@@ -1,4 +1,4 @@
-use crate::schema::CodeNode;
+use crate::schema::{CodeNode, OntologyConfig};
 use std::fs;
 use std::io::Write;
 
@@ -12,12 +12,19 @@ impl ContextCompiler {
         direction: &str,
         radius: u8,
         out_filepath: &str,
+        ontology: &OntologyConfig,
     ) -> std::io::Result<()> {
         let mut file = fs::File::create(out_filepath)?;
 
         writeln!(file, "# Dynamic Architectural Context Compilation")?;
         writeln!(file, "Generated deterministically by Celial Graph Engine.\n")?;
-        writeln!(file, "## Architectural Context Bounds")?;
+
+        writeln!(file, "## 0. Active System Ontology Configuration (Boundary Constraints)")?;
+        writeln!(file, "```json")?;
+        writeln!(file, "{}", serde_json::to_string_pretty(ontology).unwrap())?;
+        writeln!(file, "```\n")?;
+
+        writeln!(file, "## 1. Architectural Context Bounds")?;
         writeln!(file, "- **Focal Target**: `{}`", focal_target)?;
         writeln!(file, "- **Search Direction**: `{}`", direction)?;
         writeln!(file, "- **Traversed Radius**: `{}` hops", radius)?;
@@ -25,7 +32,7 @@ impl ContextCompiler {
         writeln!(file, "- **Total Resolved Nodes**: `{}`\n", nodes.len())?;
 
         writeln!(file, "---")?;
-        writeln!(file, "## 1. Focal Core Target Node")?;
+        writeln!(file, "## 2. Focal Core Target Node")?;
 
         if let Some(core_node) = nodes.iter().find(|n| n.id == focal_target) {
             Self::write_node_details(&mut file, core_node, resolution)?;
@@ -34,7 +41,7 @@ impl ContextCompiler {
         }
 
         writeln!(file, "---")?;
-        writeln!(file, "## 2. Traversed Subgraph Neighbors")?;
+        writeln!(file, "## 3. Traversed Subgraph Neighbors")?;
 
         let mut sibling_index = 0;
         for node in nodes {
@@ -66,15 +73,6 @@ impl ContextCompiler {
         
         let summary_text = node.ai_summary.as_deref().unwrap_or("No cached AI summary available.");
         writeln!(writer, "- **AI Summary**: _{}_", summary_text)?;
-
-        // Expose both previous and current code ranges to facilitate agent's delta summarization loop [5]
-        if let Some(ref old_code) = node.previous_code {
-            writeln!(writer, "\n#### Outdated Code Block (Prior to modification):")?;
-            let code_block_lang = if node.filepath.ends_with(".rs") { "rust" } else { "dart" };
-            writeln!(writer, "```{}", code_block_lang)?;
-            writeln!(writer, "{}", old_code)?;
-            writeln!(writer, "```")?;
-        }
 
         if resolution == "full" {
             writeln!(writer, "\n#### Active Code Block:")?;

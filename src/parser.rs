@@ -177,7 +177,11 @@ impl AstParser {
                 let start = current.start_byte();
                 let end = current.end_byte();
                 if end <= content.len() {
-                    hasher.update(content[start..end].as_bytes());
+                    let structural_bytes: Vec<u8> = content[start..end]
+                        .bytes()
+                        .filter(|&b| b != b' ' && b != b'\n' && b != b'\r' && b != b'\t')
+                        .collect();
+                    hasher.update(&structural_bytes);
                 }
             }
             

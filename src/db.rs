@@ -8,6 +8,13 @@ use petgraph::stable_graph::StableGraph;
 use petgraph::Direction;
 use petgraph::visit::Bfs;
 
+#[derive(serde::Serialize)]
+pub struct NodeManifest {
+    pub id: String,
+    pub filepath: String,
+    pub node_type: String,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -622,6 +629,21 @@ impl Database {
         Ok(dirty_nodes)
     }
 
+    pub fn get_dirty_nodes_manifest(&self) -> Result<Vec<NodeManifest>> {
+        let mut stmt = self.conn.prepare("SELECT id, filepath, node_type FROM nodes WHERE is_dirty = 1")?;
+        let mut rows = stmt.query([])?;
+        let mut manifest = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            manifest.push(NodeManifest {
+                id: row.get(0)?,
+                filepath: row.get(1)?,
+                node_type: row.get(2)?,
+            });
+        }
+        Ok(manifest)
+    }
+
     pub fn count_dirty_nodes(&self) -> Result<i64> {
         let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM nodes WHERE is_dirty = 1")?;
         let count: i64 = stmt.query_row([], |row| row.get(0))?;
@@ -639,7 +661,7 @@ impl Database {
         purity_barrier: Option<bool>,
         embedding_bytes: Option<Vec<u8>>,
     ) -> Result<()> {
-        let mut stmt = self.conn.prepare("SELECT semantics, ai_summary FROM nodes WHERE id = ?")?;
+        let mut stmt = self.conn.prepare("SELECT semantics, ai_summary, embedding FROM nodes WHERE id = ?")?;
         let mut rows = stmt.query(params![id])?;
         
         let (mut semantics, mut current_summary, mut current_embedding) = if let Some(row) = rows.next()? {
@@ -651,6 +673,13 @@ impl Database {
         } else {
             return Ok(());
         };
+
+        if summary.is_some() {
+            current_summary = summary;
+        }
+        if embedding_bytes.is_some() {
+            current_embedding = embedding_bytes;
+        }
         if let Some(l) = layer {
             semantics.layer = l;
         }
@@ -704,31 +733,42 @@ impl Database {
         imports: bool,
         return_types: Option<&str>,
         return_types_include: Option<&str>,
+        include_body: bool,
     ) -> Result<String> {
         let mut nodes_list = Vec::new();
         let mut errors = Vec::new();
+        let mut populated = false;
+
+        let mut push_node = |n: CodeNode, populated_ref: &mut bool| {
+            *populated_ref = true;
+            let code_payload = if include_body {
+                n.raw_code.clone()
+            } else {
+                n.raw_code.lines().next().unwrap_or("").to_string()
+            };
+            nodes_list.push(serde_json::json!({
+                "id": n.id,
+                "filepath": n.filepath,
+                "type": n.node_type.as_str(),
+                "code": code_payload
+            }));
+        };
 
         if imports {
             let pattern = if path.ends_with(".rs") { "use %" } else { "import %" };
             let matches = self.nodes_by_file_like(path, Some(pattern), 200)?;
-            for n in matches {
-                nodes_list.push(serde_json::json!({"id": n.id, "filepath": n.filepath, "type": n.node_type.as_str(), "raw_code": n.raw_code}));
-            }
+            for n in matches { push_node(n, &mut populated); }
         }
 
         if methods {
             let matches = self.methods_by_file(path)?;
-            for n in matches {
-                nodes_list.push(serde_json::json!({"id": n.id, "filepath": n.filepath, "type": n.node_type.as_str(), "raw_code": n.raw_code}));
-            }
+            for n in matches { push_node(n, &mut populated); }
         }
 
         if let Some(impl_name) = impl_methods {
             match self.methods_by_impl(path, impl_name) {
                 Ok(matches) => {
-                    for n in matches {
-                        nodes_list.push(serde_json::json!({"id": n.id, "filepath": n.filepath, "type": n.node_type.as_str(), "raw_code": n.raw_code}));
-                    }
+                    for n in matches { push_node(n, &mut populated); }
                 }
                 Err(e) => errors.push(format!("impl_methods error: {}", e)),
             }
@@ -736,31 +776,23 @@ impl Database {
 
         if independent_functions {
             let matches = self.functions_by_file(path)?;
-            for n in matches {
-                nodes_list.push(serde_json::json!({"id": n.id, "filepath": n.filepath, "type": n.node_type.as_str(), "raw_code": n.raw_code}));
-            }
+            for n in matches { push_node(n, &mut populated); }
         }
 
         if classes {
             let matches = self.class_like_by_file(path)?;
-            for n in matches {
-                nodes_list.push(serde_json::json!({"id": n.id, "filepath": n.filepath, "type": n.node_type.as_str(), "raw_code": n.raw_code}));
-            }
+            for n in matches { push_node(n, &mut populated); }
         }
 
         if functions {
             let matches = self.functions_by_file(path)?;
-            for n in matches {
-                nodes_list.push(serde_json::json!({"id": n.id, "filepath": n.filepath, "type": n.node_type.as_str(), "raw_code": n.raw_code}));
-            }
+            for n in matches { push_node(n, &mut populated); }
         }
 
         if let Some(rt) = return_types {
             match self.by_return_type(path, rt) {
                 Ok(matches) => {
-                    for n in matches {
-                        nodes_list.push(serde_json::json!({"id": n.id, "filepath": n.filepath, "type": n.node_type.as_str(), "raw_code": n.raw_code}));
-                    }
+                    for n in matches { push_node(n, &mut populated); }
                 }
                 Err(e) => errors.push(format!("return_types error: {}", e)),
             }
@@ -769,19 +801,15 @@ impl Database {
         if let Some(fragment) = return_types_include {
             match self.by_return_type_include(path, fragment) {
                 Ok(matches) => {
-                    for n in matches {
-                        nodes_list.push(serde_json::json!({"id": n.id, "filepath": n.filepath, "type": n.node_type.as_str(), "raw_code": n.raw_code}));
-                    }
+                    for n in matches { push_node(n, &mut populated); }
                 }
                 Err(e) => errors.push(format!("return_types_include error: {}", e)),
             }
         }
 
-        if nodes_list.is_empty() && !imports {
+        if !populated && !imports {
             let matches = self.nodes_by_file(path)?;
-            for n in matches {
-                nodes_list.push(serde_json::json!({"id": n.id, "filepath": n.filepath, "type": n.node_type.as_str(), "raw_code": n.raw_code}));
-            }
+            for n in matches { push_node(n, &mut populated); }
         }
 
         let result = serde_json::json!({

@@ -3,6 +3,7 @@ mod compiler;
 mod db;
 mod embedder;
 mod parser;
+mod project;
 mod schema;
 
 use clap::Parser;
@@ -11,26 +12,113 @@ use compiler::ContextCompiler;
 use db::Database;
 use embedder::LocalEmbedder;
 use parser::AstParser;
+use project::Workspace;
 use schema::OntologyConfig;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::thread::sleep;
+use std::time::Duration;
 
-fn load_ontology(path: &str) -> OntologyConfig {
-    let content = fs::read_to_string(path).expect("Failed to read ontology configuration");
-    let config: OntologyConfig = serde_json::from_str(&content).expect("Invalid ontology schema");
-    if let Err(e) = config.validate() {
-        eprintln!("Ontology boundary validation failed: {}", e);
-        std::process::exit(1);
+fn load_ontology_from_workspace(workspace: &Workspace) -> OntologyConfig {
+    workspace.config.ontology.clone()
+}
+
+fn get_git_head(dir: &str) -> String {
+    Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn force_full_reindex(workspace: &Workspace, database: &mut Database, ontology: &OntologyConfig) {
+    let output = Command::new("git")
+        .args(["ls-files"])
+        .current_dir(&workspace.root_dir)
+        .output();
+
+    if let Ok(out) = output {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut parsed_nodes = Vec::new();
+        let mut parsed_relations = Vec::new();
+
+        for line in stdout.lines() {
+            let path = workspace.root_dir.join(line);
+            if !path.exists() || workspace.is_excluded(&path.to_string_lossy()) { continue; }
+            let path_str = path.to_string_lossy().into_owned();
+            if path_str.ends_with(".rs") || path_str.ends_with(".dart") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok((mut n, mut r)) = AstParser::parse_file(&path_str, &content) {
+                        parsed_nodes.append(&mut n);
+                        parsed_relations.append(&mut r);
+                    }
+                }
+            }
+        }
+
+        let mut file_groups: HashMap<String, Vec<schema::CodeNode>> = HashMap::new();
+        for node in parsed_nodes {
+            file_groups.entry(node.filepath.clone()).or_default().push(node);
+        }
+        for (filepath, nodes) in file_groups {
+            let _ = database.sync_nodes(&filepath, &nodes);
+        }
+        let _ = database.resolve_and_save_relations(&parsed_relations);
+        let _ = database.propagate_semantics(ontology);
     }
-    config
 }
 
 fn main() {
     let args = Cli::parse();
-    let ontology = load_ontology("celial.json");
 
-    let mut database = match Database::init(".celial_graph.db") {
+    if let Commands::Init = args.command {
+        let current_dir = std::env::current_dir().expect("Failed to read current execution context directory");
+        let dot_celial = current_dir.join(".celial");
+
+        if !dot_celial.exists() {
+            fs::create_dir_all(&dot_celial).expect("Failed to initialize hidden .celial directory container");
+        }
+
+        let default_config = serde_json::json!({
+            "exclusions": ["test/", "build/", "generated/", "node_modules/", ".dart_tool/", ".git/"],
+            "ontology": {
+                "layers": ["Tier1Ui", "Tier2Fsm", "Tier3Domain"],
+                "default_layer": "Tier3Domain",
+                "purities": {"Pure": 1, "StateMutator": 2, "IoBound": 3, "Unknown": 0},
+                "default_purity": "Unknown",
+                "roles": ["FfiBridge", "StateContainer", "LayoutWidget", "Utility"],
+                "barriers": ["FfiBridge"],
+                "rules": []
+            }
+        });
+
+        let target_config_path = dot_celial.join("celial.json");
+        fs::write(
+            &target_config_path,
+            serde_json::to_string_pretty(&default_config).unwrap()
+        ).expect("Failed to write celial.json inside the target .celial/ folder boundary");
+
+        println!("Successfully bootstrapped workspace context at: {:?}", current_dir);
+        println!("Created hidden folder target location: .celial/");
+        println!("Generated operational profile: .celial/celial.json");
+        return;
+    }
+
+    let workspace = match Workspace::discover() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let ontology = load_ontology_from_workspace(&workspace);
+
+    let db_path_str = workspace.db_path.to_string_lossy();
+    let mut database = match Database::init(&db_path_str) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("Database initialization failed: {:?}", e);
@@ -39,59 +127,13 @@ fn main() {
     };
 
     match args.command {
-        Commands::DiscoverOntology => {
-            let dirty_count = database.count_dirty_nodes().unwrap_or(0);
-            
-            let ontology = serde_json::json!({
-                "structural_axes": ["upstream", "downstream", "symmetric"],
-                "layers": ["Tier1Ui", "Tier2Fsm", "Tier3Domain"],
-                "roles": ["FfiBridge", "StateContainer", "LayoutWidget", "Contract", "Implementation", "Utility"],
-                "patterns": ["Singleton", "Strategy", "Command", "FsmState", "Repository"],
-                "purities": ["Pure", "StateMutator", "IoBound"],
-                "rules": ["layer_violation", "direct_state_mutation"],
-                "state_metrics": {
-                    "pending_dirty_nodes": dirty_count
-                }
-            });
-
-            println!("{}", serde_json::to_string_pretty(&ontology).unwrap());
-        }
-        Commands::CompileContext { target, radius, direction, resolution, out } => {
-            match database.get_subgraph(&target, radius, &direction) {
-                Ok(nodes) => {
-                    // Check if focal target doesn't exist, and invoke the fuzzy suggester [4]
-                    if nodes.is_empty() {
-                        eprintln!("Focal target '{}' not found in database.", target);
-                        if let Ok(suggestions) = database.fuzzy_suggest_target(&target) {
-                            if !suggestions.is_empty() {
-                                eprintln!("Did you mean one of these active graph nodes?");
-                                for sug in suggestions {
-                                    eprintln!(" - {}", sug);
-                                }
-                            }
-                        }
-                        std::process::exit(1);
-                    }
-
-                    if let Err(e) = ContextCompiler::compile(&target, &nodes, &resolution, &direction, radius, &out) {
-                        eprintln!("Context compilation failure: {:?}", e);
-                        std::process::exit(1);
-                    } else {
-                        println!("Context saved to: {}", out);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Traversal failure: {:?}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-        Commands::Reindex { path } => {
-            println!("Scanning directory: {}", path);
+        Commands::Init => {}
+        Commands::Reindex => {
+            println!("Scanning workspace: {}", workspace.root_dir.display());
             let mut parsed_nodes = Vec::new();
             let mut parsed_relations = Vec::new();
-            
-            if let Err(e) = ingest_git_delta(&path, &mut parsed_nodes, &mut parsed_relations) {
+
+            if let Err(e) = ingest_git_delta(&workspace.root_dir.to_string_lossy(), &workspace, &mut parsed_nodes, &mut parsed_relations) {
                 eprintln!("Scanning error: {:?}", e);
                 return;
             }
@@ -125,6 +167,73 @@ fn main() {
                 Err(e) => eprintln!("Failed to run topological propagation: {:?}", e),
             }
         }
+        Commands::DiscoverOntology => {
+            let dirty_count = database.count_dirty_nodes().unwrap_or(0);
+
+            let ontology = serde_json::json!({
+                "structural_axes": ["upstream", "downstream", "symmetric"],
+                "layers": ontology.layers,
+                "roles": ontology.roles,
+                "patterns": ["Singleton", "Strategy", "Command", "FsmState", "Repository"],
+                "purities": ontology.purities.keys().cloned().collect::<Vec<_>>(),
+                "rules": ontology.rules.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+                "state_metrics": {
+                    "pending_dirty_nodes": dirty_count
+                }
+            });
+
+            println!("{}", serde_json::to_string_pretty(&ontology).unwrap());
+        }
+        Commands::CompileContext { target, radius, direction, resolution, out } => {
+            match database.get_subgraph(&target, radius, &direction) {
+                Ok(nodes) => {
+                    if nodes.is_empty() { std::process::exit(1); }
+                    if let Err(_) = ContextCompiler::compile(&target, &nodes, &resolution, &direction, radius, &out, &ontology) {
+                        std::process::exit(1);
+                    }
+                }
+                Err(_) => std::process::exit(1)
+            }
+        }
+
+        Commands::Watch => {
+            let root_dir_str = workspace.root_dir.to_string_lossy().into_owned();
+            println!("Celial Graph Engine Watch Daemon active on: {}", root_dir_str);
+            let mut last_git_head = get_git_head(&root_dir_str);
+
+            loop {
+                let current_git_head = get_git_head(&root_dir_str);
+                if current_git_head != last_git_head {
+                    println!("Git HEAD structural alteration detected ({} -> {}). Synchronizing codebase historical state...", last_git_head, current_git_head);
+                    force_full_reindex(&workspace, &mut database, &ontology);
+                    last_git_head = current_git_head;
+                    sleep(Duration::from_millis(1000));
+                    continue;
+                }
+
+                let mut parsed_nodes = Vec::new();
+                let mut parsed_relations = Vec::new();
+
+                if let Ok(_) = database.get_dirty_nodes() {
+                     if ingest_git_delta(&root_dir_str, &workspace, &mut parsed_nodes, &mut parsed_relations).is_ok() {
+                         if !parsed_nodes.is_empty() {
+                             let mut file_groups: HashMap<String, Vec<schema::CodeNode>> = HashMap::new();
+                             for node in parsed_nodes {
+                                 file_groups.entry(node.filepath.clone()).or_default().push(node);
+                             }
+                             for (filepath, nodes) in file_groups {
+                                 let _ = database.sync_nodes(&filepath, &nodes);
+                             }
+                             let _ = database.resolve_and_save_relations(&parsed_relations);
+                             let _ = database.propagate_semantics(&ontology);
+                             println!("High-frequency synchronization complete.");
+                         }
+                     }
+                }
+
+                sleep(Duration::from_millis(1000));
+            }
+        }
         Commands::Audit { rule } => {
             println!("Auditing codebase invariants against profile: {} ...", rule);
             match database.check_architectural_violations(&ontology) {
@@ -155,62 +264,67 @@ fn main() {
             }
         }
         Commands::GetDirtyNodes => {
-            match database.get_dirty_nodes() {
-                Ok(dirty_list) => {
-                    let json_array = serde_json::json!(dirty_list);
+            match database.get_dirty_nodes_manifest() {
+                Ok(manifest) => {
+                    let json_array = serde_json::json!(manifest);
                     println!("{}", serde_json::to_string_pretty(&json_array).unwrap());
                 }
                 Err(e) => {
-                    eprintln!("Failed to fetch dirty nodes: {:?}", e);
+                    eprintln!("Failed to fetch dirty nodes manifest: {:?}", e);
                     std::process::exit(1);
                 }
             }
         }
-        Commands::QueryFile { path, methods, independent_functions, impl_methods, classes, functions, imports, return_types, return_types_include } => {
+        Commands::QueryFile { path, methods, independent_functions, impl_methods, classes, functions, imports, return_types, return_types_include, include_body } => {
             println!("Querying database for: {}", path);
-            match database.query_file(&path, methods, independent_functions, impl_methods.as_deref(), classes, functions, imports, return_types.as_deref(), return_types_include.as_deref()) {
+            match database.query_file(&path, methods, independent_functions, impl_methods.as_deref(), classes, functions, imports, return_types.as_deref(), return_types_include.as_deref(), include_body) {
                 Ok(result_json) => println!("{}", result_json),
                 Err(e) => { eprintln!("Query failed: {:?}", e); std::process::exit(1); }
             }
         }
-        Commands::UpdateNode { id, summary, layer, role, pattern, purity } => {
-            println!("Updating metadata for Node ID: {}", id);
+        Commands::UpdateNodes { payload_file } => {
+            println!("Ingesting IPC payload: {}", payload_file);
+            let data = fs::read_to_string(&payload_file).expect("Failed to read IPC payload");
+            let updates: Vec<serde_json::Value> = serde_json::from_str(&data).expect("Invalid JSON payload schema");
             
-            let mut barrier_opt = None;
-            if let Some(ref r_val) = role {
-                if r_val == "FfiBridge" {
-                    barrier_opt = Some(true);
-                }
-            }
+            let mut embedder = LocalEmbedder::new().ok();
 
-            let mut embedding_blob = None;
-            if let Some(ref text) = summary {
-                let embedder = LocalEmbedder::new(".celial/models");
-                if let Ok(embedder) = embedder {
-                    let semantic_payload = format!("Symbol: {}. Summary: {}", id, text);
-                    if let Ok(vector) = embedder.embed(&semantic_payload) {
-                        let mut bytes = Vec::with_capacity(vector.len() * 4);
-                        for f in vector {
-                            bytes.extend_from_slice(&f.to_le_bytes());
+            for update in updates {
+                let id = update["id"].as_str().expect("ID required");
+                let summary = update["summary"].as_str().map(|s| s.to_string());
+                let layer = update["layer"].as_str().map(|s| s.to_string());
+                let role = update["role"].as_str().map(|s| s.to_string());
+                let pattern = update["pattern"].as_str().map(|s| s.to_string());
+                let purity = update["purity"].as_str().map(|s| s.to_string());
+
+                let mut barrier_opt = None;
+                if let Some(ref r_val) = role {
+                    if r_val == "FfiBridge" { barrier_opt = Some(true); }
+                }
+
+                let mut embedding_blob = None;
+                if let Some(ref text) = summary {
+                    if let Some(ref mut em) = embedder {
+                        let semantic_payload = format!("Symbol: {}. Summary: {}", id, text);
+                        if let Ok(vector) = em.embed(&semantic_payload) {
+                            let mut bytes = Vec::with_capacity(vector.len() * 4);
+                            for f in vector {
+                                bytes.extend_from_slice(&f.to_le_bytes());
+                            }
+                            embedding_blob = Some(bytes);
                         }
-                        embedding_blob = Some(bytes);
                     }
                 }
-            }
 
-            match database.update_node_metadata(&id, summary, layer, role, pattern, purity, barrier_opt, embedding_blob) {
-                Ok(_) => {
-                    println!("Successfully updated node state and cleared dirty tracking flags.");
-                }
-                Err(e) => {
-                    eprintln!("Failed to update node metadata: {:?}", e);
-                    std::process::exit(1);
+                if let Err(e) = database.update_node_metadata(id, summary, layer, role, pattern, purity, barrier_opt, embedding_blob) {
+                    eprintln!("Failed to update node metadata for ID {}: {:?}", id, e);
                 }
             }
+            println!("Successfully processed batch updates.");
         }
         Commands::SemanticSearch { query, limit } => {
-            let embedder = LocalEmbedder::new(".celial/models");
-            let results = if let Ok(embedder) = embedder {
+            let embedder = LocalEmbedder::new();
+            let results = if let Ok(mut embedder) = embedder {
                 let query_vector = match embedder.embed(&query) {
                     Ok(v) => v,
                     Err(e) => {
@@ -241,11 +355,12 @@ fn main() {
 
 fn ingest_git_delta(
     dir: &str,
+    workspace: &Workspace,
     all_nodes: &mut Vec<schema::CodeNode>,
     all_relations: &mut Vec<schema::UnresolvedRelation>,
 ) -> std::io::Result<()> {
     let output = Command::new("git")
-        .args(["diff", "--name-only", "HEAD"])
+        .args(["ls-files", "--modified", "--others", "--exclude-standard"])
         .current_dir(dir)
         .output()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -264,6 +379,9 @@ fn ingest_git_delta(
             continue;
         }
         let path_str = path.to_string_lossy();
+        if workspace.is_excluded(&path_str) {
+            continue;
+        }
         if path_str.ends_with(".rs") || path_str.ends_with(".dart") {
             if let Ok(content) = fs::read_to_string(&path) {
                 match AstParser::parse_file(&path_str, &content) {

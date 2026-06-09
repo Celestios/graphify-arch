@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    pub exclusions: Vec<String>,
+    pub ontology: OntologyConfig,
+}
+
 // The Parametric Boundary Definition (O_meta)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OntologyConfig {

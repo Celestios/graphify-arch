@@ -17,3 +17,5 @@ streaming-iterator = "0.1"
 ort = { version = "2.0.0-rc.2", features = ["load-dynamic"] }
 tokenizers = "0.15"
 byteorder = "1.5"
+dirs = "5.0"
+ndarray = "0.15"
