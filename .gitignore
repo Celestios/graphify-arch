@@ -5,3 +5,14 @@ coverage/
 *.log
 .celial_graph.db
 
+# Python
+__pycache__/
+*.egg-info/
+
+# Agent/Graphify outputs & metadata
+.gemini/
+.graphify/
+graphify-out/
+
+# Test project
+test_project/
