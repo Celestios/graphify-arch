@@ -1,27 +1,24 @@
 import networkx as nx
 from pathlib import Path
 from schema import OntologyConfig
+from utils import resolve_relative_path
 
-def propagate_purities(G: nx.MultiDiGraph, ontology: OntologyConfig, root: Path) -> nx.MultiDiGraph:
+def propagate_metadata(G: nx.MultiDiGraph, ontology: OntologyConfig, root: Path) -> nx.MultiDiGraph:
     """Propagates values for fields configured with 'propagation' handler."""
     # Find all field names that have a propagation handler in any directory
     propagation_fields = set()
-    for dir_name, fields in ontology.directories.items():
-        for name, field_cfg in fields.items():
+    for dir_name, dir_cfg in ontology.directories.items():
+        all_fields = {}
+        all_fields.update(dir_cfg.manual_fields)
+        all_fields.update(dir_cfg.automatic_fields)
+        for name, field_cfg in all_fields.items():
             if field_cfg.handler == "propagation":
                 propagation_fields.add(name)
 
     for field_name in propagation_fields:
         # For each node, we need to initialize default value if not set
         for node_id, node_data in G.nodes(data=True):
-            sf = node_data.get("source_file") or ""
-            if sf:
-                try:
-                    rel_sf = Path(sf).relative_to(root).as_posix()
-                except ValueError:
-                    rel_sf = Path(sf).as_posix()
-            else:
-                rel_sf = ""
+            rel_sf = resolve_relative_path(node_data.get("source_file"), root)
             fields_cfg = ontology.get_fields_for_file(rel_sf)
             field_config = fields_cfg.get(field_name)
             if not field_config:
@@ -42,14 +39,7 @@ def propagate_purities(G: nx.MultiDiGraph, ontology: OntologyConfig, root: Path)
 
             for u in G.nodes():
                 u_data = G.nodes[u]
-                sf = u_data.get("source_file") or ""
-                if sf:
-                    try:
-                        rel_sf = Path(sf).relative_to(root).as_posix()
-                    except ValueError:
-                        rel_sf = Path(sf).as_posix()
-                else:
-                    rel_sf = ""
+                rel_sf = resolve_relative_path(u_data.get("source_file"), root)
                 fields_cfg = ontology.get_fields_for_file(rel_sf)
                 field_config = fields_cfg.get(field_name)
                 if not field_config:
@@ -59,7 +49,10 @@ def propagate_purities(G: nx.MultiDiGraph, ontology: OntologyConfig, root: Path)
                 weights = field_config.weights
                 if not weights:
                     # Fallback to values list index
-                    weights = {val: idx for idx, val in enumerate(field_config.values)}
+                    if field_config.values is not None:
+                        weights = {val: idx for idx, val in enumerate(field_config.values)}
+                    else:
+                        weights = {}
                 reverse_weight_map = {v: k for k, v in weights.items()}
 
                 barriers = set(field_config.barriers)
@@ -83,14 +76,7 @@ def propagate_purities(G: nx.MultiDiGraph, ontology: OntologyConfig, root: Path)
                     v_data = G.nodes[v]
                     v_val = v_data.get(f"arch_meta_{field_name}")
                     if v_val is None:
-                        v_sf = v_data.get("source_file") or ""
-                        if v_sf:
-                            try:
-                                rel_v_sf = Path(v_sf).relative_to(root).as_posix()
-                            except ValueError:
-                                rel_v_sf = Path(v_sf).as_posix()
-                        else:
-                            rel_v_sf = ""
+                        rel_v_sf = resolve_relative_path(v_data.get("source_file"), root)
                         v_fields_cfg = ontology.get_fields_for_file(rel_v_sf)
                         v_field_config = v_fields_cfg.get(field_name)
                         v_val = v_field_config.default if v_field_config else None

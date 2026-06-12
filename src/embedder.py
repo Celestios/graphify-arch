@@ -4,34 +4,40 @@ import onnxruntime as ort
 from tokenizers import Tokenizer
 
 
+def bootstrap_embedding_model() -> tuple[Path, Path]:
+    """Resolves local storage bounds and retrieves the ONNX embedding model assets if needed."""
+    import urllib.request
+    home_dir = Path.home()
+    model_dir = home_dir / ".celial" / "models"
+
+    model_path = model_dir / "model.onnx"
+    tokenizer_path = model_dir / "tokenizer.json"
+
+    if not model_path.exists() or not tokenizer_path.exists():
+        model_dir.mkdir(parents=True, exist_ok=True)
+        MODEL_URL = "https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/model.onnx"
+        TOKENIZER_URL = "https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/tokenizer.json"
+        
+        try:
+            if not model_path.exists():
+                print(f"Downloading ONNX model to {model_path} (one-time operation)...")
+                urllib.request.urlretrieve(MODEL_URL, model_path)
+            if not tokenizer_path.exists():
+                print(f"Downloading tokenizer to {tokenizer_path}...")
+                urllib.request.urlretrieve(TOKENIZER_URL, tokenizer_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to download embedding model: {e}")
+            
+    return model_path, tokenizer_path
+
+
 class LocalEmbedder:
 
     def __init__(self):
         """
-        Cold-boots the embedding environment by resolving local storage bounds
-        and initializing the ONNX optimization pipeline.
+        Cold-boots the embedding environment by initializing the ONNX optimization pipeline.
         """
-        import urllib.request
-        home_dir = Path.home()
-        model_dir = home_dir / ".celial" / "models"
-
-        model_path = model_dir / "model.onnx"
-        tokenizer_path = model_dir / "tokenizer.json"
-
-        if not model_path.exists() or not tokenizer_path.exists():
-            model_dir.mkdir(parents=True, exist_ok=True)
-            MODEL_URL = "https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/model.onnx"
-            TOKENIZER_URL = "https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/tokenizer.json"
-            
-            try:
-                if not model_path.exists():
-                    print(f"Downloading ONNX model to {model_path} (one-time operation)...")
-                    urllib.request.urlretrieve(MODEL_URL, model_path)
-                if not tokenizer_path.exists():
-                    print(f"Downloading tokenizer to {tokenizer_path}...")
-                    urllib.request.urlretrieve(TOKENIZER_URL, tokenizer_path)
-            except Exception as e:
-                raise RuntimeError(f"Failed to download embedding model: {e}")
+        model_path, tokenizer_path = bootstrap_embedding_model()
 
         try:
             self.tokenizer = Tokenizer.from_file(str(tokenizer_path))
@@ -47,6 +53,7 @@ class LocalEmbedder:
                                                 sess_options=opts)
         except Exception as e:
             raise RuntimeError(f"ONNX Session compilation failed: {e}")
+
 
     def embed(self, text: str) -> list[float]:
         """

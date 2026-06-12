@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 import sqlite3
 import json
 import struct
@@ -9,6 +11,7 @@ from schema import (AstNodeType, CodeNode, EdgeType, OntologyConfig,
                     SemanticFacets, UnresolvedRelation, ContainsRelation,
                     CallsRelation, ImplementsRelation, FfiBridgeRelation,
                     FfiExportRelation)
+from propagator import propagate_metadata
 
 
 @dataclass
@@ -32,9 +35,281 @@ class Violation:
 class Database:
 
     def __init__(self, path: str):
-        self.conn = sqlite3.connect(path)
+        self.db_path = Path(path)
+        self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
+
+    def _get_db_json_path(self) -> Path:
+        return self.db_path.parent / "db.json"
+
+    def _load_db_json(self) -> Dict[str, Any]:
+        p = self._get_db_json_path()
+        if not p.exists():
+            return {"components": {}}
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"components": {}}
+
+    def _save_db_json(self, data: Dict[str, Any]):
+        p = self._get_db_json_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            
+        graph_path = self.db_path.parent.parent / "graph.json"
+        if graph_path.exists():
+            try:
+                with open(graph_path, "r", encoding="utf-8") as f:
+                    current_graph = json.load(f)
+            except Exception:
+                return
+                
+            from utils import resolve_relative_path
+            if self.db_path.parent.name == "arch":
+                root = self.db_path.parent.parent.parent
+            else:
+                root = self.db_path.parent.parent
+                
+            components = data.get("components", {})
+            meta_by_file = {}
+            for k, comp in components.items():
+                rel_k = resolve_relative_path(k, root)
+                meta_by_file[rel_k] = comp
+                
+            modified = False
+            for node in current_graph.get("nodes", []):
+                sf = node.get("source_file")
+                if sf:
+                    rel_sf = resolve_relative_path(sf, root)
+                    comp_meta = None
+                    if rel_sf in meta_by_file:
+                        comp_meta = meta_by_file[rel_sf]
+                    else:
+                        for k, comp in meta_by_file.items():
+                            if rel_sf.endswith(k) or k.endswith(rel_sf):
+                                comp_meta = comp
+                                break
+                    if comp_meta:
+                        status = comp_meta.get("status")
+                        if status:
+                            node["status"] = status
+                            
+                        manual_status = comp_meta.get("manual_status")
+                        if manual_status is not None:
+                            node["arch_meta_manual_status"] = manual_status
+                            
+                        manual_fields = comp_meta.get("manual_fields") or {}
+                        for fk, fv in manual_fields.items():
+                            node[f"arch_meta_{fk}"] = fv
+                            
+                        manual_violations = [v["message"] for v in comp_meta.get("violations", []) if v.get("origin") == "manual"]
+                        if manual_violations:
+                            node["arch_meta_manual_violations"] = " | ".join(manual_violations)
+                        else:
+                            node.pop("arch_meta_manual_violations", None)
+                            
+                        ast_hash = comp_meta.get("ast_hash")
+                        if ast_hash:
+                            node["ast_hash"] = ast_hash
+                            
+                        modified = True
+                        
+            if modified:
+                with open(graph_path, "w", encoding="utf-8") as f:
+                    json.dump(current_graph, f, indent=2, ensure_ascii=False)
+
+    def get_component(self, filepath: str) -> Optional[Dict[str, Any]]:
+        db_data = self._load_db_json()
+        components = db_data.get("components", {})
+        if filepath not in components:
+            for k in components:
+                if k.endswith(filepath) or filepath.endswith(k):
+                    return components[k]
+            return None
+        return components[filepath]
+
+    def save_component(self, filepath: str, status: str, manual_status: Optional[str], manual_fields: Dict[str, Any], violations: List[Dict[str, Any]]):
+        db_data = self._load_db_json()
+        components = db_data.setdefault("components", {})
+        existing = components.get(filepath) or {}
+        ast_hash = existing.get("ast_hash")
+        
+        components[filepath] = {
+            "status": status,
+            "manual_status": manual_status,
+            "manual_fields": manual_fields,
+            "violations": violations
+        }
+        if ast_hash:
+            components[filepath]["ast_hash"] = ast_hash
+        self._save_db_json(db_data)
+
+    def set_component_status(self, filepath: str, status: str, violations_msg: str):
+        comp = self.get_component(filepath)
+        if comp:
+            manual_fields = comp.get("manual_fields") or {}
+            existing_violations = comp.get("violations") or []
+        else:
+            manual_fields = {}
+            existing_violations = []
+            
+        filtered_violations = [v for v in existing_violations if v.get("origin") != "manual"]
+        if violations_msg and status == "VIOLATION_DETECTED":
+            filtered_violations.append({
+                "origin": "manual",
+                "message": violations_msg
+            })
+            
+        self.save_component(filepath, status, status, manual_fields, filtered_violations)
+
+    def set_component_status_bulk(self, updates: Dict[str, Dict[str, Any]], ontology, root: Path):
+        import sys
+        from utils import resolve_relative_path
+        
+        db_data = self._load_db_json()
+        components = db_data.setdefault("components", {})
+        
+        for raw_key, entry_data in updates.items():
+            filepath = resolve_relative_path(raw_key, root)
+            
+            comp = None
+            matched_key = filepath
+            if filepath in components:
+                comp = components[filepath]
+            else:
+                for k in components:
+                    if k.endswith(filepath) or filepath.endswith(k):
+                        matched_key = k
+                        comp = components[k]
+                        break
+            
+            if comp:
+                manual_fields = comp.get("manual_fields") or {}
+                existing_violations = comp.get("violations") or []
+                ast_hash = comp.get("ast_hash")
+            else:
+                manual_fields = {}
+                existing_violations = []
+                ast_hash = None
+                
+            status = entry_data.get("status")
+            violations_raw = entry_data.get("violations", "")
+            if isinstance(violations_raw, list):
+                violations_msg = " | ".join(str(v) for v in violations_raw)
+            else:
+                violations_msg = str(violations_raw) if violations_raw is not None else ""
+                
+            filtered_violations = [v for v in existing_violations if v.get("origin") != "manual"]
+            if violations_msg and status == "VIOLATION_DETECTED":
+                filtered_violations.append({
+                    "origin": "manual",
+                    "message": violations_msg
+                })
+                
+            dir_fields = ontology.get_manual_fields_for_file(matched_key)
+            for k, v in entry_data.items():
+                if k in dir_fields:
+                    field_cfg = dir_fields[k]
+                    if field_cfg.values is None or v in field_cfg.values:
+                        manual_fields[k] = v
+                    else:
+                        print(f"warning: value '{v}' for manual field '{k}' is not allowed. Using default '{field_cfg.default}'", file=sys.stderr)
+                        manual_fields[k] = field_cfg.default
+                        
+            components[matched_key] = {
+                "status": status,
+                "manual_status": status,
+                "manual_fields": manual_fields,
+                "violations": filtered_violations
+            }
+            if ast_hash:
+                components[matched_key]["ast_hash"] = ast_hash
+            
+        self._save_db_json(db_data)
+
+    def update_violations_and_statuses(self, violations: List[Any], ontology, root: Path, G: Optional[Any] = None) -> List[Dict[str, Any]]:
+        import sys
+        from utils import resolve_relative_path
+        
+        violations_by_file = {}
+        for v in violations:
+            rel_path = resolve_relative_path(v.filepath, root)
+            violations_by_file.setdefault(rel_path, []).append(v)
+            
+        all_files = set()
+        if G is not None:
+            for node_id in G.nodes:
+                sf = G.nodes[node_id].get("source_file")
+                if sf:
+                    all_files.add(resolve_relative_path(sf, root))
+        else:
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute("SELECT DISTINCT filepath FROM nodes")
+                all_files = {resolve_relative_path(row["filepath"], root) for row in cursor.fetchall()}
+            except Exception:
+                pass
+        
+        db_data = self._load_db_json()
+        components = db_data.setdefault("components", {})
+        
+        # Include any existing files in db.json and current violations
+        all_files.update(components.keys())
+        all_files.update(violations_by_file.keys())
+        
+        all_aggregated_violations = []
+        
+        for filepath in all_files:
+            # Skip empty or non-existent file path keys
+            if not filepath:
+                continue
+            comp = components.get(filepath)
+            if comp:
+                manual_status = comp.get("manual_status")
+                manual_fields = comp.get("manual_fields") or {}
+                # Ensure manual fields are populated (even if empty)
+                # Keep ast_hash if present
+                ast_hash = comp.get("ast_hash")
+                aggregated = [v for v in comp.get("violations", []) if v.get("origin") == "manual"]
+            else:
+                manual_status = None
+                manual_fields = {}
+                ast_hash = None
+                aggregated = []
+                
+            file_violations = violations_by_file.get(filepath, [])
+            for v in file_violations:
+                aggregated.append({
+                    "origin": "automated",
+                    "rule": v.rule_name,
+                    "message": v.message,
+                    "source_node": v.source_id,
+                    "target_node": v.target_id,
+                    "filepath": filepath
+                })
+                
+            if manual_status:
+                status = manual_status
+            elif aggregated:
+                status = "VIOLATION_DETECTED"
+            else:
+                status = "COMPLIANT"
+                
+            components[filepath] = {
+                "status": status,
+                "manual_status": manual_status,
+                "manual_fields": manual_fields,
+                "violations": aggregated
+            }
+            if ast_hash:
+                components[filepath]["ast_hash"] = ast_hash
+            all_aggregated_violations.extend(aggregated)
+            
+        self._save_db_json(db_data)
+        return all_aggregated_violations
 
     def _create_tables(self):
         """Initializes the relational schema and indices[cite: 3]."""
@@ -73,7 +348,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_edges_tgt ON edges (target_id)")
         self.conn.commit()
 
-    def sync_nodes(self, filepath: str, parsed_nodes: List[CodeNode]):
+    def sync_nodes(self, filepath: str, parsed_nodes: List[CodeNode], ontology: Optional[OntologyConfig] = None):
         """Transactionally updates database state, storing deltas for code modifications[cite: 3]."""
         cursor = self.conn.cursor()
 
@@ -126,10 +401,10 @@ class Database:
 
         self.conn.commit()
 
-    def resolve_and_save_relations(self,
+    def resolve_and_sync_relations(self,
                                    unresolved: List[UnresolvedRelation],
                                    affected_files: Optional[List[str]] = None):
-        """Resolves symbol-based relations using file-scope and receiver context[cite: 3]."""
+        """Resolves symbol-based relations using file-scope and receiver context."""
         cursor = self.conn.cursor()
         symbol_to_ids = {}
         existing_node_ids = set()
@@ -208,19 +483,8 @@ class Database:
 
     def get_graph(self) -> nx.MultiDiGraph:
         """Helper to build NetworkX MultiDiGraph from database nodes and edges."""
-        nodes = self._get_all_nodes_internal()
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT source_id, target_id, edge_type FROM edges")
-        edges = cursor.fetchall()
+        return GraphBuilder.build_graph(self)
 
-        G = nx.MultiDiGraph()
-        for node_id, node in nodes.items():
-            G.add_node(node_id, data=node)
-
-        for s, t, etype in edges:
-            if s in G and t in G:
-                G.add_edge(s, t, type=etype)
-        return G
 
     def propagate_semantics(self, ontology: OntologyConfig):
         """Builds a topological graph and propagates layers and purities."""
@@ -250,8 +514,7 @@ class Database:
                             parent]['data'].semantics.layer
 
         # Use external propagator for purity upward propagation
-        from propagator import propagate_purities
-        G = propagate_purities(G, ontology)
+        G = propagate_metadata(G, ontology, Path(os.getcwd()))
 
         # Commit semantic updates
         cursor = self.conn.cursor()
@@ -284,92 +547,25 @@ class Database:
 
     def get_subgraph(self, target_id: str, radius: int,
                      direction: str) -> List[CodeNode]:
-        """Performs a BFS traversal to collect a sub-graph of nodes[cite: 3]."""
-        visited = {target_id}
-        target_node = self.get_node(target_id)
-        if not target_node: return []
-
-        results = [target_node]
-        current_front = [target_id]
-
-        for _ in range(radius):
-            next_front = []
-            for cid in current_front:
-                neighbors = self._get_neighbors(cid, direction)
-                for nid in neighbors:
-                    if nid not in visited:
-                        visited.add(nid)
-                        if node := self.get_node(nid):
-                            results.append(node)
-                            next_front.append(nid)
-            if not next_front: break
-            current_front = next_front
-        return results
-
-    def _get_neighbors(self, node_id: str, direction: str) -> List[str]:
-        cursor = self.conn.cursor()
-        neighbors = []
-        if direction == "downstream":
-            cursor.execute("SELECT target_id FROM edges WHERE source_id = ?",
-                           (node_id, ))
-        elif direction == "upstream":
-            cursor.execute("SELECT source_id FROM edges WHERE target_id = ?",
-                           (node_id, ))
-        elif direction == "symmetric":
-            # Implements/Contains symmetry logic[cite: 3]
-            cursor.execute(
-                """
-                SELECT source_id FROM edges 
-                WHERE edge_type = 'Implements' AND target_id IN (
-                    SELECT target_id FROM edges WHERE source_id = ? AND edge_type = 'Implements'
-                ) AND source_id != ?
-            """, (node_id, node_id))
-            neighbors.extend([r[0] for r in cursor.fetchall()])
-            cursor.execute(
-                """
-                SELECT target_id FROM edges 
-                WHERE edge_type = 'Contains' AND source_id IN (
-                    SELECT source_id FROM edges WHERE target_id = ? AND edge_type = 'Contains'
-                ) AND target_id != ?
-            """, (node_id, node_id))
-
-        neighbors.extend([r[0] for r in cursor.fetchall()])
-        return neighbors
+        """Performs a BFS traversal to collect a sub-graph of nodes."""
+        G = self.get_graph()
+        return GraphTraverser.get_subgraph(G, target_id, radius, direction)
 
     def semantic_vector_search(self, query_embedding: List[float],
                                limit: int) -> Dict[str, Any]:
         """Performs cosine similarity search using stored embedding blobs[cite: 3, 4]."""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT id, filepath, node_type, ai_summary, embedding FROM nodes WHERE embedding IS NOT NULL"
-        )
+        return VectorSearchEngine.search(self, query_embedding, limit)
 
-        scored_nodes = []
-        for row in cursor.fetchall():
-            blob = row['embedding']
-            # Unpack little-endian floats[cite: 3, 4]
-            n_floats = len(blob) // 4
-            node_emb = struct.unpack(f'<{n_floats}f', blob)
-
-            similarity = sum(q * n for q, n in zip(query_embedding, node_emb))
-            scored_nodes.append({
-                "score": similarity,
-                "id": row['id'],
-                "filepath": row['filepath'],
-                "type": row['node_type'],
-                "summary": row['ai_summary'] or ""
-            })
-
-        scored_nodes.sort(key=lambda x: x['score'], reverse=True)
-        return {
-            "count": min(len(scored_nodes), limit),
-            "results": scored_nodes[:limit]
-        }
 
     def _get_all_nodes_internal(self) -> Dict[str, CodeNode]:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM nodes")
         return {row['id']: self._row_to_node(row) for row in cursor.fetchall()}
+
+    def _get_all_relations_internal(self) -> List[Tuple[str, str, str]]:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT source_id, target_id, edge_type FROM edges")
+        return [(r['source_id'], r['target_id'], r['edge_type']) for r in cursor.fetchall()]
 
     def count_dirty_nodes(self) -> int:
         cursor = self.conn.cursor()
@@ -402,3 +598,100 @@ class Database:
             WHERE id = ?
         """, (semantics_json, node.ai_summary, embedding_bytes, node_id))
         self.conn.commit()
+
+
+class GraphBuilder:
+    @staticmethod
+    def build_graph(db: Database) -> nx.MultiDiGraph:
+        """Helper to build NetworkX MultiDiGraph from database nodes and edges."""
+        nodes = db._get_all_nodes_internal()
+        edges = db._get_all_relations_internal()
+
+        G = nx.MultiDiGraph()
+        for node_id, node in nodes.items():
+            G.add_node(node_id, data=node)
+
+        for s, t, etype in edges:
+            if s in G and t in G:
+                G.add_edge(s, t, type=etype)
+        return G
+
+
+class VectorSearchEngine:
+    @staticmethod
+    def search(db: Database, query_embedding: List[float], limit: int) -> Dict[str, Any]:
+        """Performs cosine similarity search using stored embedding blobs."""
+        cursor = db.conn.cursor()
+        cursor.execute(
+            "SELECT id, filepath, node_type, ai_summary, embedding FROM nodes WHERE embedding IS NOT NULL"
+        )
+
+        scored_nodes = []
+        for row in cursor.fetchall():
+            blob = row['embedding']
+            # Unpack little-endian floats
+            n_floats = len(blob) // 4
+            node_emb = struct.unpack(f'<{n_floats}f', blob)
+
+            similarity = sum(q * n for q, n in zip(query_embedding, node_emb))
+            scored_nodes.append({
+                "score": similarity,
+                "id": row['id'],
+                "filepath": row['filepath'],
+                "type": row['node_type'],
+                "summary": row['ai_summary'] or ""
+            })
+
+        scored_nodes.sort(key=lambda x: x['score'], reverse=True)
+        return {
+            "count": min(len(scored_nodes), limit),
+            "results": scored_nodes[:limit]
+        }
+
+
+class GraphTraverser:
+    @staticmethod
+    def get_subgraph(G: nx.MultiDiGraph, target_id: str, radius: int, direction: str) -> List[CodeNode]:
+        if target_id not in G:
+            return []
+
+        visited = {target_id}
+        results = [G.nodes[target_id]['data']]
+        current_front = [target_id]
+
+        for _ in range(radius):
+            next_front = []
+            for cid in current_front:
+                neighbors = GraphTraverser._get_neighbors(G, cid, direction)
+                for nid in neighbors:
+                    if nid not in visited and nid in G:
+                        visited.add(nid)
+                        results.append(G.nodes[nid]['data'])
+                        next_front.append(nid)
+            if not next_front:
+                break
+            current_front = next_front
+        return results
+
+    @staticmethod
+    def _get_neighbors(G: nx.MultiDiGraph, node_id: str, direction: str) -> List[str]:
+        neighbors = []
+        if direction == "downstream":
+            if node_id in G:
+                neighbors.extend(G.successors(node_id))
+        elif direction == "upstream":
+            if node_id in G:
+                neighbors.extend(G.predecessors(node_id))
+        elif direction == "symmetric":
+            for u, v, key, data in G.edges(keys=True, data=True):
+                if u == node_id and data.get("type") == "Implements":
+                    for w, target_node, k, d in G.in_edges(v, keys=True, data=True):
+                        if d.get("type") == "Implements" and w != node_id:
+                            neighbors.append(w)
+                if v == node_id and data.get("type") == "Contains":
+                    for parent_node, w, k, d in G.out_edges(u, keys=True, data=True):
+                        if d.get("type") == "Contains" and w != node_id:
+                            neighbors.append(w)
+        return list(set(neighbors))
+
+

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 from schema import OntologyConfig
 from db import Violation
+from utils import resolve_relative_path
 
 def audit_architecture_rules(G: nx.MultiDiGraph, ontology: OntologyConfig, root: Path) -> List[Violation]:
     """Runs structural audits against configured architectural rules on call/import graphs."""
@@ -14,14 +15,7 @@ def audit_architecture_rules(G: nx.MultiDiGraph, ontology: OntologyConfig, root:
         if relation.lower() not in ["calls", "uses", "references", "implements", "ffibridge", "imports"]:
             continue
             
-        u_sf = G.nodes[u].get("source_file") or ""
-        if u_sf:
-            try:
-                rel_u_sf = Path(u_sf).relative_to(root).as_posix()
-            except ValueError:
-                rel_u_sf = Path(u_sf).as_posix()
-        else:
-            rel_u_sf = ""
+        rel_u_sf = resolve_relative_path(G.nodes[u].get("source_file"), root)
         u_fields_cfg = ontology.get_fields_for_file(rel_u_sf)
         
         for field_name, field_config in u_fields_cfg.items():

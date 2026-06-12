@@ -22,4 +22,4 @@ arch = "plugin:ArchPlugin"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["plugin", "plugins", "scaffolder", "propagator", "auditor", "embedder", "main", "cli", "compiler", "db", "project", "schema", "parser"]
+py-modules = ["plugin", "plugin_helpers", "plugins", "scaffolder", "propagator", "auditor", "embedder", "main", "cli", "compiler", "db", "project", "schema", "parser"]

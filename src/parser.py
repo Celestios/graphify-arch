@@ -1,6 +1,7 @@
 import os
+from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 import blake3
 from tree_sitter import Language, Parser, Query, Node as TsNode
 
@@ -24,6 +25,128 @@ try:
 except ImportError:
     pass
 
+
+class LanguageParser(ABC):
+    """Abstract strategy for language-specific parser implementations."""
+
+    @property
+    @abstractmethod
+    def extension(self) -> str:
+        """The file extension handled by this parser."""
+        pass
+
+    @property
+    @abstractmethod
+    def query_name(self) -> str:
+        """The query scm file name representing this language parser."""
+        pass
+
+    @abstractmethod
+    def get_language(self) -> Optional[Language]:
+        """Returns the tree-sitter Language instance."""
+        pass
+
+    @abstractmethod
+    def get_node_type_for_class(self) -> AstNodeType:
+        """Determines the semantic AST node type mapped to class definitions."""
+        pass
+
+
+class RustParser(LanguageParser):
+    @property
+    def extension(self) -> str:
+        return "rs"
+
+    @property
+    def query_name(self) -> str:
+        return "rust"
+
+    def get_language(self) -> Optional[Language]:
+        return RUST_LANG
+
+    def get_node_type_for_class(self) -> AstNodeType:
+        return AstNodeType.STRUCT
+
+
+class DartParser(LanguageParser):
+    @property
+    def extension(self) -> str:
+        return "dart"
+
+    @property
+    def query_name(self) -> str:
+        return "dart"
+
+    def get_language(self) -> Optional[Language]:
+        return DART_LANG
+
+    def get_node_type_for_class(self) -> AstNodeType:
+        return AstNodeType.CLASS
+
+
+PARSER_STRATEGIES: Dict[str, LanguageParser] = {
+    "rs": RustParser(),
+    "dart": DartParser(),
+}
+
+
+def handle_class_node(parser_cls, ts_node, filepath, file_node_id, content_bytes, strategy, nodes, relations, resolve_active_source):
+    name_node = parser_cls._find_child_by_kind(ts_node, "type_identifier")
+    if name_node:
+        name = parser_cls._get_node_text(name_node, content_bytes)
+        node_id = f"{filepath}::{name}"
+        node_type = strategy.get_node_type_for_class()
+        nodes.append(parser_cls._build_code_node(node_id, filepath, node_type, ts_node, content_bytes))
+        relations.append(ContainsRelation(source_id=file_node_id, target_id=node_id))
+
+
+def handle_function_node(parser_cls, ts_node, filepath, file_node_id, content_bytes, strategy, nodes, relations, resolve_active_source):
+    name_node = parser_cls._find_child_by_kind(ts_node, "identifier")
+    if name_node:
+        name = parser_cls._get_node_text(name_node, content_bytes)
+        node_id = f"{file_node_id}::{name}"
+        nodes.append(parser_cls._build_code_node(node_id, filepath, AstNodeType.FUNCTION, ts_node, content_bytes))
+        relations.append(ContainsRelation(source_id=file_node_id, target_id=node_id))
+
+
+def handle_impl_target_node(parser_cls, ts_node, filepath, file_node_id, content_bytes, strategy, nodes, relations, resolve_active_source):
+    name_node = parser_cls._find_child_by_kind(ts_node, "type_identifier")
+    if name_node:
+        name = parser_cls._get_node_text(name_node, content_bytes)
+        node_id = f"{filepath}::impl_{name}"
+        nodes.append(parser_cls._build_code_node(node_id, filepath, AstNodeType.STRUCT, ts_node, content_bytes))
+        relations.append(ContainsRelation(source_id=file_node_id, target_id=node_id))
+
+
+def handle_calls_relation(parser_cls, ts_node, filepath, file_node_id, content_bytes, strategy, nodes, relations, resolve_active_source):
+    symbol = parser_cls._get_node_text(ts_node, content_bytes)
+    relations.append(CallsRelation(source_id=resolve_active_source(ts_node), target_symbol=symbol, caller_filepath=filepath))
+
+
+def handle_implements_relation(parser_cls, ts_node, filepath, file_node_id, content_bytes, strategy, nodes, relations, resolve_active_source):
+    symbol = parser_cls._get_node_text(ts_node, content_bytes)
+    relations.append(ImplementsRelation(source_id=resolve_active_source(ts_node), target_symbol=symbol))
+
+
+def handle_ffi_bridge_relation(parser_cls, ts_node, filepath, file_node_id, content_bytes, strategy, nodes, relations, resolve_active_source):
+    symbol = parser_cls._get_node_text(ts_node, content_bytes)
+    relations.append(FfiBridgeRelation(source_id=resolve_active_source(ts_node), target_symbol=symbol, caller_filepath=filepath))
+
+
+def handle_ffi_export_relation(parser_cls, ts_node, filepath, file_node_id, content_bytes, strategy, nodes, relations, resolve_active_source):
+    symbol = parser_cls._get_node_text(ts_node, content_bytes)
+    relations.append(FfiExportRelation(source_id=resolve_active_source(ts_node), target_symbol=symbol))
+
+
+CAPTURE_HANDLERS = {
+    "node.class": handle_class_node,
+    "node.function": handle_function_node,
+    "node.impl_target": handle_impl_target_node,
+    "relation.calls": handle_calls_relation,
+    "relation.implements": handle_implements_relation,
+    "relation.ffi_bridge": handle_ffi_bridge_relation,
+    "node.ffi_export": handle_ffi_export_relation,
+}
 
 
 class AstParser:
@@ -51,24 +174,22 @@ class AstParser:
             content: str) -> Tuple[List[CodeNode], List[UnresolvedRelation]]:
         """Parses target source code and yields isolated structural nodes and logical edges."""
         suffix = Path(filepath).suffix.lstrip(".")
+        strategy = PARSER_STRATEGIES.get(suffix)
 
-        if suffix == "rs":
-            if RUST_LANG is None:
-                raise ValueError("Rust tree-sitter grammar is not installed.")
-            query_src = cls.locate_query("rust")
-            return cls._exec_query(filepath, content, query_src, RUST_LANG)
-        elif suffix == "dart":
-            if DART_LANG is None:
-                raise ValueError("Dart tree-sitter grammar is not installed.")
-            query_src = cls.locate_query("dart")
-            return cls._exec_query(filepath, content, query_src, DART_LANG)
-        else:
+        if not strategy:
             raise ValueError(f"Unsupported file extension: .{suffix}")
+
+        lang = strategy.get_language()
+        if lang is None:
+            raise ValueError(f"{strategy.query_name.capitalize()} tree-sitter grammar is not installed.")
+
+        query_src = cls.locate_query(strategy.query_name)
+        return cls._exec_query(filepath, content, query_src, lang, strategy)
 
     @classmethod
     def _exec_query(
             cls, filepath: str, content: str, query_src: str,
-            language: Language
+            language: Language, strategy: LanguageParser
     ) -> Tuple[List[CodeNode], List[UnresolvedRelation]]:
         parser = Parser(language)
         # Tree-sitter expects source encoding bytes for correct index tracking
@@ -107,76 +228,9 @@ class AstParser:
 
         # Tree-sitter Python captures return a dictionary/list of tuples: (Node, capture_name)
         for ts_node, capture_name in captures:
-
-            if capture_name == "node.class":
-                name_node = cls._find_child_by_kind(ts_node, "type_identifier")
-                if name_node:
-                    name = cls._get_node_text(name_node, content_bytes)
-                    node_id = f"{filepath}::{name}"
-                    node_type = AstNodeType.STRUCT if filepath.endswith(
-                        ".rs") else AstNodeType.CLASS
-
-                    nodes.append(
-                        cls._build_code_node(node_id, filepath, node_type,
-                                             ts_node, content_bytes))
-                    relations.append(
-                        ContainsRelation(source_id=file_node_id,
-                                         target_id=node_id))
-
-            elif capture_name == "node.function":
-                name_node = cls._find_child_by_kind(ts_node, "identifier")
-                if name_node:
-                    name = cls._get_node_text(name_node, content_bytes)
-                    node_id = f"{file_node_id}::{name}"
-
-                    nodes.append(
-                        cls._build_code_node(node_id, filepath,
-                                             AstNodeType.FUNCTION, ts_node,
-                                             content_bytes))
-                    relations.append(
-                        ContainsRelation(source_id=file_node_id,
-                                         target_id=node_id))
-
-            elif capture_name == "node.impl_target":
-                name_node = cls._find_child_by_kind(ts_node, "type_identifier")
-                if name_node:
-                    name = cls._get_node_text(name_node, content_bytes)
-                    node_id = f"{filepath}::impl_{name}"
-
-                    nodes.append(
-                        cls._build_code_node(node_id, filepath,
-                                             AstNodeType.STRUCT, ts_node,
-                                             content_bytes))
-                    relations.append(
-                        ContainsRelation(source_id=file_node_id,
-                                         target_id=node_id))
-
-            elif capture_name == "relation.calls":
-                symbol = cls._get_node_text(ts_node, content_bytes)
-                relations.append(
-                    CallsRelation(source_id=resolve_active_source(ts_node),
-                                  target_symbol=symbol,
-                                  caller_filepath=filepath))
-
-            elif capture_name == "relation.implements":
-                symbol = cls._get_node_text(ts_node, content_bytes)
-                relations.append(
-                    ImplementsRelation(
-                        source_id=resolve_active_source(ts_node),
-                        target_symbol=symbol))
-
-            elif capture_name == "relation.ffi_bridge":
-                symbol = cls._get_node_text(ts_node, content_bytes)
-                relations.append(
-                    FfiBridgeRelation(source_id=resolve_active_source(ts_node),
-                                      target_symbol=symbol,
-                                      caller_filepath=filepath))
-
-            elif capture_name == "node.ffi_export":
-                symbol = cls._get_node_text(ts_node, content_bytes)
-                relations.append(
-                    FfiExportRelation(source_id=resolve_active_source(ts_node),
-                                      target_symbol=symbol))
+            handler = CAPTURE_HANDLERS.get(capture_name)
+            if handler:
+                handler(cls, ts_node, filepath, file_node_id, content_bytes, strategy, nodes, relations, resolve_active_source)
 
         return nodes, relations
 
@@ -247,3 +301,4 @@ class AstParser:
                         semantics=SemanticFacets(),
                         raw_code=raw_segment,
                         is_dirty=True)
+

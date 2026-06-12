@@ -4,7 +4,6 @@ import json
 import time
 import queue
 import subprocess
-import shutil
 from pathlib import Path
 from typing import List, Set, Dict, Any
 
@@ -81,7 +80,7 @@ def force_full_reindex(workspace: Workspace, database: Database,
     for filepath, nodes in file_groups.items():
         database.sync_nodes(filepath, nodes)
 
-    database.resolve_and_save_relations(parsed_relations, None)
+    database.resolve_and_sync_relations(parsed_relations, None)
     database.propagate_semantics(ontology)
 
 
@@ -128,148 +127,182 @@ class WorkspaceWatchHandler(FileSystemEventHandler):
 
     def on_any_event(self, event):
         if isinstance(event,
-                      (FileModifiedEvent, FileCreatedEvent, FileDeletedEvent)):
+                       (FileModifiedEvent, FileCreatedEvent, FileDeletedEvent)):
             self.event_queue.put(event.src_path)
+
+
+# Command Dispatch Handlers
+
+def handle_init(args) -> None:
+    from scaffolder import scaffold_project
+    current_dir = Path.cwd().resolve()
+    dot_celial = current_dir / ".celial"
+    dot_celial.mkdir(parents=True, exist_ok=True)
+
+    default_config = scaffold_project(current_dir)
+    config_path = dot_celial / "celial.json"
+    
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(default_config, f, indent=4)
+    print(f"Initialized Celial workspace at {config_path}")
+
+
+def handle_discover_ontology(args, workspace, database) -> None:
+    print(json.dumps(dataclasses.asdict(workspace.config.ontology), indent=2))
+
+
+def handle_reindex(args, workspace, database) -> None:
+    from plugins import discover_plugins, run_hook
+    plugins = discover_plugins(workspace.root_dir)
+    
+    force_full_reindex(workspace, database, workspace.config.ontology)
+    
+    # Trigger post-build plugin hooks and save semantic mutations
+    G = database.get_graph()
+    G = run_hook(plugins, "on_post_build", G, {}, workspace.root_dir)
+    
+    cursor = database.conn.cursor()
+    for node_id in G.nodes:
+        new_sem = G.nodes[node_id]['data'].semantics
+        cursor.execute("UPDATE nodes SET semantics = ? WHERE id = ?",
+                       (json.dumps(dataclasses.asdict(new_sem)), node_id))
+    database.conn.commit()
+    
+    print("Reindexing and ontology semantic propagation completed.")
+
+
+def handle_get_dirty_nodes(args, workspace, database) -> None:
+    nodes = database._get_all_nodes_internal().values()
+    dirty_nodes = [
+        {"id": n.id, "filepath": n.filepath, "node_type": n.node_type.value}
+        for n in nodes if n.is_dirty
+    ]
+    print(json.dumps(dirty_nodes, indent=2))
+
+
+def handle_compile_context(args, workspace, database) -> None:
+    nodes = database.get_subgraph(args.target, args.radius, args.direction)
+    ContextCompiler.compile(args.target, nodes, args.resolution, args.direction, args.radius, args.out, workspace.config.ontology)
+    print(f"Compiled context to {args.out}")
+
+
+def handle_audit(args, workspace, database) -> None:
+    from auditor import audit_architecture_rules
+    from plugins import discover_plugins, run_hook
+    plugins = discover_plugins(workspace.root_dir)
+    
+    G = database.get_graph()
+    G = run_hook(plugins, "on_post_build", G, {}, workspace.root_dir)
+    
+    violations = audit_architecture_rules(G, workspace.config.ontology, workspace.root_dir)
+    analysis = {"violations": [dataclasses.asdict(v) for v in violations]}
+    analysis = run_hook(plugins, "on_post_analyze", G, {}, analysis, workspace.root_dir)
+    
+    print(json.dumps(analysis, indent=2))
+
+
+def handle_query_file(args, workspace, database) -> None:
+    nodes = database._get_all_nodes_internal().values()
+    results = []
+    for n in nodes:
+        if n.filepath != args.path:
+            continue
+        match = False
+        if not (args.methods or args.independent_functions or args.impl_methods or args.classes or args.functions or args.imports):
+            match = True
+        else:
+            if args.methods and n.node_type == AstNodeType.METHOD:
+                match = True
+            if args.functions and n.node_type == AstNodeType.FUNCTION:
+                match = True
+            if args.classes and n.node_type in (AstNodeType.STRUCT, AstNodeType.CLASS):
+                match = True
+            if args.independent_functions and n.node_type == AstNodeType.FUNCTION and "::" not in n.id.split(args.path + "::")[-1]:
+                match = True
+            if args.impl_methods and f"impl_{args.impl_methods}" in n.id:
+                match = True
+        if match:
+            results.append({
+                "id": n.id,
+                "filepath": n.filepath,
+                "node_type": n.node_type.value,
+                "raw_code": n.raw_code if args.include_body else None
+            })
+    print(json.dumps(results, indent=2))
+
+
+def handle_update_nodes(args, workspace, database) -> None:
+    with open(args.payload_file, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    for update in payload:
+        database.update_node_metadata(
+            node_id=update["id"],
+            summary=update.get("summary"),
+            layer=update.get("layer"),
+            role=update.get("role"),
+            pattern=update.get("pattern"),
+            purity=update.get("purity"),
+            embedding_bytes=bytes.fromhex(update["embedding"]) if "embedding" in update else None
+        )
+    print("Updated nodes successfully.")
+
+
+def handle_semantic_search(args, workspace, database) -> None:
+    embedder = LocalEmbedder()
+    query_emb = embedder.embed(args.query)
+    res = database.semantic_vector_search(query_emb, args.limit)
+    print(json.dumps(res, indent=2))
+
+
+def handle_watch(args, workspace, database) -> None:
+    print(f"Monitoring workspace {workspace.root_dir} for changes...")
+    event_queue = queue.Queue()
+    handler = WorkspaceWatchHandler(event_queue)
+    observer = Observer()
+    observer.schedule(handler, str(workspace.root_dir), recursive=True)
+    observer.start()
+    try:
+        while True:
+            time.sleep(1)
+            changed_files = set()
+            while not event_queue.empty():
+                changed_files.add(event_queue.get())
+            if changed_files:
+                print(f"Detected changes in: {list(changed_files)}. Reindexing...")
+                force_full_reindex(workspace, database, workspace.config.ontology)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
 
 
 def main() -> None:
     args = cli.parse_args()
 
     if args.command == "init":
-        from scaffolder import scaffold_project
-        current_dir = Path.cwd().resolve()
-        dot_celial = current_dir / ".celial"
-        dot_celial.mkdir(parents=True, exist_ok=True)
-
-        default_config = scaffold_project(current_dir)
-        config_path = dot_celial / "celial.json"
-        
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(default_config, f, indent=4)
-        print(f"Initialized Celial workspace at {config_path}")
+        handle_init(args)
         return
 
     workspace = Workspace.discover()
     database = Database(str(workspace.db_path))
 
-    if args.command == "discover-ontology":
-        print(json.dumps(dataclasses.asdict(workspace.config.ontology), indent=2))
+    handlers = {
+        "discover-ontology": handle_discover_ontology,
+        "reindex": handle_reindex,
+        "get-dirty-nodes": handle_get_dirty_nodes,
+        "compile-context": handle_compile_context,
+        "audit": handle_audit,
+        "query-file": handle_query_file,
+        "update-nodes": handle_update_nodes,
+        "semantic-search": handle_semantic_search,
+        "watch": handle_watch,
+    }
 
-    elif args.command == "reindex":
-        from plugins import discover_plugins, run_hook
-        plugins = discover_plugins(workspace.root_dir)
-        
-        force_full_reindex(workspace, database, workspace.config.ontology)
-        
-        # Trigger post-build plugin hooks and save semantic mutations
-        G = database.get_graph()
-        G = run_hook(plugins, "on_post_build", G, {}, workspace.root_dir)
-        
-        cursor = database.conn.cursor()
-        for node_id in G.nodes:
-            new_sem = G.nodes[node_id]['data'].semantics
-            cursor.execute("UPDATE nodes SET semantics = ? WHERE id = ?",
-                           (json.dumps(dataclasses.asdict(new_sem)), node_id))
-        database.conn.commit()
-        
-        print("Reindexing and ontology semantic propagation completed.")
-
-    elif args.command == "get-dirty-nodes":
-        nodes = database._get_all_nodes_internal().values()
-        dirty_nodes = [
-            {"id": n.id, "filepath": n.filepath, "node_type": n.node_type.value}
-            for n in nodes if n.is_dirty
-        ]
-        print(json.dumps(dirty_nodes, indent=2))
-
-    elif args.command == "compile-context":
-        nodes = database.get_subgraph(args.target, args.radius, args.direction)
-        ContextCompiler.compile(args.target, nodes, args.resolution, args.direction, args.radius, args.out, workspace.config.ontology)
-        print(f"Compiled context to {args.out}")
-
-    elif args.command == "audit":
-        from auditor import audit_architecture_rules
-        from plugins import discover_plugins, run_hook
-        plugins = discover_plugins(workspace.root_dir)
-        
-        G = database.get_graph()
-        G = run_hook(plugins, "on_post_build", G, {}, workspace.root_dir)
-        
-        violations = audit_architecture_rules(G, workspace.config.ontology)
-        analysis = {"violations": [dataclasses.asdict(v) for v in violations]}
-        analysis = run_hook(plugins, "on_post_analyze", G, {}, analysis, workspace.root_dir)
-        
-        print(json.dumps(analysis, indent=2))
-
-    elif args.command == "query-file":
-        nodes = database._get_all_nodes_internal().values()
-        results = []
-        for n in nodes:
-            if n.filepath != args.path:
-                continue
-            match = False
-            if not (args.methods or args.independent_functions or args.impl_methods or args.classes or args.functions or args.imports):
-                match = True
-            else:
-                if args.methods and n.node_type == AstNodeType.METHOD:
-                    match = True
-                if args.functions and n.node_type == AstNodeType.FUNCTION:
-                    match = True
-                if args.classes and n.node_type in (AstNodeType.STRUCT, AstNodeType.CLASS):
-                    match = True
-                if args.independent_functions and n.node_type == AstNodeType.FUNCTION and "::" not in n.id.split(args.path + "::")[-1]:
-                    match = True
-                if args.impl_methods and f"impl_{args.impl_methods}" in n.id:
-                    match = True
-            if match:
-                results.append({
-                    "id": n.id,
-                    "filepath": n.filepath,
-                    "node_type": n.node_type.value,
-                    "raw_code": n.raw_code if args.include_body else None
-                })
-        print(json.dumps(results, indent=2))
-
-    elif args.command == "update-nodes":
-        with open(args.payload_file, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        for update in payload:
-            database.update_node_metadata(
-                node_id=update["id"],
-                summary=update.get("summary"),
-                layer=update.get("layer"),
-                role=update.get("role"),
-                pattern=update.get("pattern"),
-                purity=update.get("purity"),
-                embedding_bytes=bytes.fromhex(update["embedding"]) if "embedding" in update else None
-            )
-        print("Updated nodes successfully.")
-
-    elif args.command == "semantic-search":
-        embedder = LocalEmbedder()
-        query_emb = embedder.embed(args.query)
-        res = database.semantic_vector_search(query_emb, args.limit)
-        print(json.dumps(res, indent=2))
-
-    elif args.command == "watch":
-        print(f"Monitoring workspace {workspace.root_dir} for changes...")
-        event_queue = queue.Queue()
-        handler = WorkspaceWatchHandler(event_queue)
-        observer = Observer()
-        observer.schedule(handler, str(workspace.root_dir), recursive=True)
-        observer.start()
-        try:
-            while True:
-                time.sleep(1)
-                changed_files = set()
-                while not event_queue.empty():
-                    changed_files.add(event_queue.get())
-                if changed_files:
-                    print(f"Detected changes in: {list(changed_files)}. Reindexing...")
-                    force_full_reindex(workspace, database, workspace.config.ontology)
-        except KeyboardInterrupt:
-            observer.stop()
-        observer.join()
+    handler = handlers.get(args.command)
+    if handler:
+        handler(args, workspace, database)
+    else:
+        print(f"Unknown command: {args.command}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
