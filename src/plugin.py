@@ -31,8 +31,11 @@ class ArchPlugin(PluginHookInterface):
             return False
         cmd = args[0]
         if cmd == "arch":
+            if not args[1:]:
+                PluginCLIHandler.print_arch_help()
+                sys.exit(0)
             if not self.config_path.exists():
-                print("Error: graphify-out/arch/config.json not found. Create it with the AI agent or write an ontology config manually.", file=sys.stderr)
+                print("warning: graphify-out/arch/config.json not found. The AI agent should create it, or write an ontology config manually.", file=sys.stderr)
                 sys.exit(1)
             PluginCLIHandler.handle_arch_cli(Path.cwd(), args[1:], self)
             sys.exit(0)

@@ -13,6 +13,28 @@ from auditor import audit_architecture_rules
 
 class PluginCLIHandler:
     @staticmethod
+    def print_arch_help():
+        print("""Usage: graphify arch <command>
+
+Architecture enforcement commands:
+
+  audit                                   Check all files for architectural violations
+  audit --rule <type>                     Check for a specific violation type
+  set-status <file> <status> [msg]        Override compliance status for a file
+  set-status-bulk <json-file>             Bulk-set manual status overrides
+  analyze                                 Validate ontology config syntax and consistency
+  setup-embeddings                        Download ONNX embedding model for semantic search
+
+Status values:
+  COMPLIANT           File passes all architectural rules
+  VIOLATION_DETECTED  File has at least one violation
+  PENDING_AUDIT       File needs re-audit (e.g., after code changes)
+
+Config:
+  Define rules in graphify-out/arch/config.json
+  See references/config.md for the full schema""")
+
+    @staticmethod
     def handle_arch_cli(root: Path, args: list[str], plugin_instance):
         import argparse
         parser = argparse.ArgumentParser(prog="graphify arch")
@@ -565,67 +587,62 @@ class PluginReportGenerator:
         ]
         
         skill_section = """
-### Architecture Enforcement (graphify-arch)
+---
 
-This project uses graphify-arch to enforce architectural rules. The AI agent is responsible for:
+## graphify-arch: Architecture Enforcement
 
-1. **Generating and maintaining `graphify-out/arch/config.json`** — the ontology config that defines:
-   - Manual fields (agent-guided metadata like `pattern`, `ai_summary`)
-   - Automatic fields (rule-assigned metadata like `layer`, `tier`, `architectural_role`)
-   - Dependency rules (e.g., "Presentation cannot call Infrastructure")
+### What graphify-arch is for
 
-2. **Before making code changes:**
-   - Run `graphify arch audit` to check for existing violations
-   - Run `graphify arch compile-context --target <node_id>` to understand the impact on dependent code
+Enforce architectural rules on a codebase. The AI agent defines layers, tiers, and dependency constraints in `graphify-out/arch/config.json`. The plugin enforces them on every graphify run and reports violations.
 
-3. **After making code changes:**
-   - Run `graphify arch reindex` to update the graph
-   - Run `graphify arch audit` to verify compliance
+### Usage
 
-#### Config Structure
+| Command | Description |
+|---------|-------------|
+| `graphify arch` | Show help and available commands |
+| `graphify arch audit` | Check all files for architectural violations |
+| `graphify arch set-status <file> <status> [msg]` | Override compliance status for a file |
+| `graphify arch set-status-bulk <json-file>` | Bulk-set manual status overrides |
+| `graphify arch analyze` | Validate config syntax and consistency |
+| `graphify arch setup-embeddings` | Download ONNX embedding model |
 
-```json
-{
-  "lib": {
-    "manual_fields": {
-      "pattern": { "values": ["Data Model", "Controller", "None"], "default": "None" }
-    },
-    "automatic_fields": {
-      "layer": {
-        "values": ["Presentation", "Application", "Domain", "Infrastructure"],
-        "default": "Domain",
-        "assignment_rules": [
-          {"value": "Presentation", "conditions": {"path_prefix": "lib/ui"}}
-        ],
-        "handler": "dependency_check",
-        "rules": [
-          {"source": "Presentation", "target": "Infrastructure", "message": "Presentation cannot call Infrastructure"}
-        ]
-      }
-    }
-  }
-}
-```
+### Agent workflow
 
-#### Commands
+1. **Analyze the codebase** — understand directory structure, identify natural layers
+2. **Generate `graphify-out/arch/config.json`** — define fields, assignment rules, and dependency constraints
+3. **Before code changes** — `graphify arch audit` to check for existing violations
+4. **After code changes** — `graphify arch audit` to verify compliance
+5. **Override intentional violations** — `graphify arch set-status <file> COMPLIANT "reason"`
 
-```
-graphify arch reindex                                  # update graph with arch metadata
-graphify arch audit                                    # check for architectural violations
-graphify arch query-file --path <file>                 # query nodes for a specific file
-graphify arch compile-context --target <id>            # compile subgraph context for LLM input
-graphify arch semantic-search --query <text>           # vector similarity search over code
-```
+### References
+
+- `references/config.md` — full config schema, field types, assignment rules, handlers, examples
+- `references/commands.md` — all CLI commands with arguments and output format
+- `references/audit.md` — interpreting violations and fixing them
+- `references/context.md` — compiling subgraph context for LLM input
 """
+        # Source directory for reference files
+        src_refs_dir = Path(__file__).parent / "references"
+        
         for sf in skill_files:
             if not sf.exists():
                 continue
                 
             try:
                 content = sf.read_text(encoding="utf-8")
-                if "Usage for graphify-arch" not in content:
+                if "graphify-arch: Architecture Enforcement" not in content:
                     new_content = content.rstrip() + "\n\n" + skill_section.strip() + "\n"
                     sf.write_text(new_content, encoding="utf-8")
+                
+                # Copy reference files
+                if src_refs_dir.exists():
+                    skill_dir = sf.parent
+                    refs_dir = skill_dir / "references"
+                    refs_dir.mkdir(parents=True, exist_ok=True)
+                    for ref_file in src_refs_dir.glob("*.md"):
+                        dst = refs_dir / ref_file.name
+                        if not dst.exists():
+                            dst.write_text(ref_file.read_text(encoding="utf-8"), encoding="utf-8")
             except Exception as e:
                 print(f"warning: failed to write skill to {sf}: {e}", file=sys.stderr)
 
