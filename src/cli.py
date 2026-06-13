@@ -19,13 +19,6 @@ def parse_args() -> argparse.Namespace:
         "discover-ontology",
         help="Discover active ontology axes and layer configuration topology.")
 
-    # Init
-    subparsers.add_parser(
-        "init",
-        help=
-        "Bootstrap workspace environment and generate .arch/arch.json baseline."
-    )
-
     # Reindex
     subparsers.add_parser(
         "reindex",

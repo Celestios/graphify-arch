@@ -11,7 +11,7 @@ This plugin extends graphify with an architecture layer. When an AI agent runs g
 3. **Audits violations** — detects when code breaks the architectural rules the user specified
 4. **Provides context** — compiles subgraph neighborhoods and semantic search for agents to understand code structure
 
-The agent reads the user's architectural intent (e.g., "Presentation cannot call Infrastructure directly") and encodes it in `graphify-out/arch/config.json`. The plugin then enforces those rules on every reindex.
+The AI agent reads the user's architectural intent (e.g., "Presentation cannot call Infrastructure directly") and encodes it in `graphify-out/arch/config.json`. The plugin then enforces those rules on every reindex.
 
 ## Requirements
 
@@ -38,18 +38,15 @@ pip install -e .
 # 1. Run graphify on your project to generate the graph
 graphify extract /path/to/your/project
 
-# 2. Initialize the arch config
-graphify arch init
+# 2. The AI agent generates graphify-out/arch/config.json with ontology rules
 
-# 3. Edit graphify-out/arch/config.json to define your ontology
-
-# 4. Reindex with architecture metadata
+# 3. Reindex with architecture metadata
 graphify arch reindex
 
-# 5. Audit for violations
+# 4. Audit for violations
 graphify arch audit
 
-# 6. Query the graph
+# 5. Query the graph
 graphify arch query-file --path src/my_module.py --methods
 ```
 
@@ -87,7 +84,6 @@ Place `graphify-out/arch/config.json` in your project. Define per-directory fiel
 
 | Command | Description |
 |---------|-------------|
-| `graphify arch init` | Bootstrap workspace and generate config |
 | `graphify arch reindex` | Scan workspace, update DB graph with arch metadata |
 | `graphify arch audit` | Audit architectural rules and report violations |
 | `graphify arch query-file --path <file>` | Query nodes for a specific file |

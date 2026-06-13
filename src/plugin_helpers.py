@@ -517,6 +517,14 @@ class PluginReportGenerator:
                     rf.write_text(content, encoding="utf-8")
                     continue
 
+                target_rules = [
+                    "- Respect the architectural boundaries defined in `graphify-out/arch/config.json` when proposing or making code changes.",
+                    "- Before proposing changes, run `graphify arch audit` to check for existing violations.",
+                    "- After making code changes, run `graphify arch reindex` then `graphify arch audit` to verify compliance.",
+                    "- Use `graphify arch compile-context --target <node_id>` to understand the impact of changes on dependent code.",
+                ]
+                target_rules_text = "\n".join(target_rules)
+
                 lines = content.splitlines()
                 rules_header_idx = -1
                 for idx, line in enumerate(lines):
@@ -525,7 +533,7 @@ class PluginReportGenerator:
                         break
 
                 if rules_header_idx == -1:
-                    new_content = content.rstrip() + "\n\nRules:\n" + target_rule + "\n"
+                    new_content = content.rstrip() + "\n\nRules:\n" + target_rules_text + "\n"
                 else:
                     # Find the last bullet point of the list under Rules:
                     last_bullet_idx = -1
@@ -537,10 +545,10 @@ class PluginReportGenerator:
                             break
 
                     if last_bullet_idx != -1:
-                        lines.insert(last_bullet_idx + 1, target_rule)
+                        lines.insert(last_bullet_idx + 1, target_rules_text)
                         new_content = "\n".join(lines) + "\n"
                     else:
-                        lines.insert(rules_header_idx + 1, target_rule)
+                        lines.insert(rules_header_idx + 1, target_rules_text)
                         new_content = "\n".join(lines) + "\n"
 
                 rf.write_text(new_content, encoding="utf-8")
@@ -558,13 +566,56 @@ class PluginReportGenerator:
         ]
         
         skill_section = """
-### Usage for graphify-arch
+### Architecture Enforcement (graphify-arch)
+
+This project uses graphify-arch to enforce architectural rules. The AI agent is responsible for:
+
+1. **Generating and maintaining `graphify-out/arch/config.json`** — the ontology config that defines:
+   - Manual fields (agent-guided metadata like `pattern`, `ai_summary`)
+   - Automatic fields (rule-assigned metadata like `layer`, `tier`, `architectural_role`)
+   - Dependency rules (e.g., "Presentation cannot call Infrastructure")
+
+2. **Before making code changes:**
+   - Run `graphify arch audit` to check for existing violations
+   - Run `graphify arch compile-context --target <node_id>` to understand the impact on dependent code
+
+3. **After making code changes:**
+   - Run `graphify arch reindex` to update the graph
+   - Run `graphify arch audit` to verify compliance
+
+#### Config Structure
+
+```json
+{
+  "lib": {
+    "manual_fields": {
+      "pattern": { "values": ["Data Model", "Controller", "None"], "default": "None" }
+    },
+    "automatic_fields": {
+      "layer": {
+        "values": ["Presentation", "Application", "Domain", "Infrastructure"],
+        "default": "Domain",
+        "assignment_rules": [
+          {"value": "Presentation", "conditions": {"path_prefix": "lib/ui"}}
+        ],
+        "handler": "dependency_check",
+        "rules": [
+          {"source": "Presentation", "target": "Infrastructure", "message": "Presentation cannot call Infrastructure"}
+        ]
+      }
+    }
+  }
+}
+```
+
+#### Commands
 
 ```
-/graphify arch audit                                  # audit project directory for architectural layer/tier compliance
-/graphify arch set-status <filepath> <status> [msg]   # manually override compliance status for a file
-/graphify arch set-status-bulk <json-file>            # bulk-set manual status overrides
-/graphify arch analyze                                # validate ontology config syntax and consistency
+graphify arch reindex                                  # update graph with arch metadata
+graphify arch audit                                    # check for architectural violations
+graphify arch query-file --path <file>                 # query nodes for a specific file
+graphify arch compile-context --target <id>            # compile subgraph context for LLM input
+graphify arch semantic-search --query <text>           # vector similarity search over code
 ```
 """
         for sf in skill_files:

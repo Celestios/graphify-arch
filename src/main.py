@@ -80,20 +80,6 @@ def sync_graph_to_database(database: Database, G) -> None:
 
 # Command Dispatch Handlers
 
-def handle_init(args) -> None:
-    from scaffolder import scaffold_project
-    current_dir = Path.cwd().resolve()
-    arch_dir = current_dir / "graphify-out" / "arch"
-    arch_dir.mkdir(parents=True, exist_ok=True)
-
-    default_config = scaffold_project(current_dir)
-    config_path = arch_dir / "config.json"
-
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(default_config, f, indent=4)
-    print(f"Initialized Graphify-Arch workspace at {config_path}")
-
-
 def handle_discover_ontology(args, workspace, database) -> None:
     print(json.dumps(dataclasses.asdict(workspace.config.ontology), indent=2))
 
@@ -204,11 +190,6 @@ def handle_semantic_search(args, workspace, database) -> None:
 
 def main() -> None:
     args = cli.parse_args()
-
-    if args.command == "init":
-        handle_init(args)
-        return
-
     workspace = Workspace.discover()
     database = Database(str(workspace.db_path))
 
