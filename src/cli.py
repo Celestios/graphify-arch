@@ -8,7 +8,7 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description=
-        "Celial Graph Engine Architectural Indexer Command Line Interface")
+        "Graphify-Arch Architectural Indexer Command Line Interface")
 
     subparsers = parser.add_subparsers(dest="command",
                                        required=True,
@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser(
         "init",
         help=
-        "Bootstrap workspace environment and generate .celial/celial.json baseline."
+        "Bootstrap workspace environment and generate .arch/arch.json baseline."
     )
 
     # Reindex

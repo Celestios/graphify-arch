@@ -2,7 +2,7 @@
 import sqlite3, json, argparse, re, sys
 from pathlib import Path
 
-DB_PATH = Path(".celial_graph.db")
+DB_PATH = Path(".arch_graph.db")
 if not DB_PATH.exists():
     print("DB missing; run Reindex first")
     sys.exit(1)

@@ -8,7 +8,7 @@ def bootstrap_embedding_model() -> tuple[Path, Path]:
     """Resolves local storage bounds and retrieves the ONNX embedding model assets if needed."""
     import urllib.request
     home_dir = Path.home()
-    model_dir = home_dir / ".celial" / "models"
+    model_dir = home_dir / ".arch" / "models"
 
     model_path = model_dir / "model.onnx"
     tokenizer_path = model_dir / "tokenizer.json"
@@ -19,6 +19,11 @@ def bootstrap_embedding_model() -> tuple[Path, Path]:
         TOKENIZER_URL = "https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/tokenizer.json"
         
         try:
+            # Install an opener with a browser-like User-Agent to avoid throttling or WinError 10054
+            opener = urllib.request.build_opener()
+            opener.addheaders = [("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")]
+            urllib.request.install_opener(opener)
+
             if not model_path.exists():
                 print(f"Downloading ONNX model to {model_path} (one-time operation)...")
                 urllib.request.urlretrieve(MODEL_URL, model_path)
@@ -71,11 +76,13 @@ class LocalEmbedder:
         # Construct 2D tensor matrices [1, sequence_length] directly
         input_ids = np.array([encoding.ids], dtype=np.int64)
         attention_mask = np.array([encoding.attention_mask], dtype=np.int64)
+        token_type_ids = np.array([encoding.type_ids], dtype=np.int64)
 
         try:
             outputs = self.session.run(None, {
                 "input_ids": input_ids,
-                "attention_mask": attention_mask
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids
             })
         except Exception as e:
             raise RuntimeError(f"ONNX inference execution failed: {e}")

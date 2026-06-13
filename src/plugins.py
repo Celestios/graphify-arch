@@ -3,10 +3,10 @@ import importlib.metadata
 import logging
 from pathlib import Path
 
-logger = logging.getLogger("celial.plugins")
+logger = logging.getLogger("graphify_arch.plugins")
 
 class PluginHookInterface:
-    """Interface that plugins should implement to hook into Celial."""
+    """Interface that plugins should implement to hook into Graphify-Arch."""
     name: str = "base_plugin"
 
     def should_activate(self, root: Path) -> bool:
@@ -30,7 +30,7 @@ class PluginHookInterface:
         pass
 
     def register_cli(self, subparsers) -> None:
-        """Register subcommands into the Celial CLI arg parser."""
+        """Register subcommands into the Graphify-Arch CLI arg parser."""
         pass
 
 
@@ -38,8 +38,8 @@ def discover_plugins(root: Path) -> list[PluginHookInterface]:
     """Discover and return all active plugins using importlib entry points."""
     active_plugins = []
     
-    # Query entry points registered under the group 'celial.plugins' and 'graphify.plugins'
-    for group in ["celial.plugins", "graphify.plugins"]:
+    # Query entry points registered under the group 'graphify_arch.plugins' and legacy 'graphify.plugins'
+    for group in ["graphify_arch.plugins", "graphify.plugins"]:
         try:
             entry_points = importlib.metadata.entry_points(group=group)
         except Exception as e:

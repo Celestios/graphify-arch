@@ -17,7 +17,7 @@ class ContextCompiler:
         import io
         writer = io.StringIO()
         writer.write("# Dynamic Architectural Context Compilation\n")
-        writer.write("Generated deterministically by Celial Graph Engine.\n\n")
+        writer.write("Generated deterministically by Graphify-Arch Engine.\n\n")
 
         writer.write("## 0. Active System Ontology Configuration (Boundary Constraints)\n")
         writer.write("```json\n")

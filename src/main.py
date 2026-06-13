@@ -136,15 +136,15 @@ class WorkspaceWatchHandler(FileSystemEventHandler):
 def handle_init(args) -> None:
     from scaffolder import scaffold_project
     current_dir = Path.cwd().resolve()
-    dot_celial = current_dir / ".celial"
-    dot_celial.mkdir(parents=True, exist_ok=True)
+    dot_arch = current_dir / ".arch"
+    dot_arch.mkdir(parents=True, exist_ok=True)
 
     default_config = scaffold_project(current_dir)
-    config_path = dot_celial / "celial.json"
+    config_path = dot_arch / "arch.json"
     
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(default_config, f, indent=4)
-    print(f"Initialized Celial workspace at {config_path}")
+    print(f"Initialized Graphify-Arch workspace at {config_path}")
 
 
 def handle_discover_ontology(args, workspace, database) -> None:

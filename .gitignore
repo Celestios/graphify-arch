@@ -3,7 +3,7 @@ dist/
 coverage/
 .DS_Store
 *.log
-.celial_graph.db
+.arch_graph.db
 
 # Python
 __pycache__/
