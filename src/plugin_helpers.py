@@ -853,7 +853,7 @@ Full documentation is available in the `references/` folder alongside this skill
             try:
                 content = skill_file.read_text(encoding="utf-8")
                 if "graphify-arch: Architecture Enforcement" not in content:
-skill_section = """
+                    skill_section = """
 ---
 
 ## graphify-arch: Architecture Enforcement
