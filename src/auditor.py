@@ -24,23 +24,27 @@ def audit_architecture_rules(G: nx.MultiDiGraph, ontology: OntologyConfig, root:
             if field_config.handler != "dependency_check":
                 continue
                 
-            u_val = G.nodes[u].get(f"arch_meta_{field_name}")
-            v_val = G.nodes[v].get(f"arch_meta_{field_name}")
+            # Use _src/_tgt for correct direction (preserved from extraction)
+            src = edge_data.get("_src", u)
+            tgt = edge_data.get("_tgt", v)
             
-            if u_val is None or v_val is None:
+            src_val = G.nodes[src].get(f"arch_meta_{field_name}")
+            tgt_val = G.nodes[tgt].get(f"arch_meta_{field_name}")
+            
+            if src_val is None or tgt_val is None:
                 skipped_count += 1
                 continue
                 
             # Check rules
             for rule in field_config.rules:
-                if u_val == rule.source and v_val == rule.target:
+                if src_val == rule.source and tgt_val == rule.target:
                     violations.append(Violation(
                         rule_name=f"{field_name}_violation",
-                        source_id=u,
-                        target_id=v,
-                        filepath=G.nodes[u].get("source_file", ""),
-                        start_byte=G.nodes[u].get("start_byte", 0),
-                        end_byte=G.nodes[u].get("end_byte", 0),
+                        source_id=src,
+                        target_id=tgt,
+                        filepath=G.nodes[src].get("source_file", ""),
+                        start_byte=G.nodes[src].get("start_byte", 0),
+                        end_byte=G.nodes[src].get("end_byte", 0),
                         message=rule.message
                     ))
 
