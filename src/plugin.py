@@ -319,6 +319,7 @@ class ArchPlugin(PluginHookInterface):
         try:
             db = Database(str(self.db_path))
             all_violations = db.update_violations_and_statuses(violations, ontology, root, G)
+            db.sync_graph_metadata(G, root)
             
             components = db.get_all_components()
             

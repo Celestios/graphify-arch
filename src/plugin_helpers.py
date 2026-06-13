@@ -157,6 +157,7 @@ Config:
                 config_path, db_path = ConfigLoader.find_config(root)
                 db = Database(str(db_path))
                 db.update_violations_and_statuses(violations, ontology, root, G)
+                db.sync_graph_metadata(G, root)
                 
                 components = db.get_all_components()
                 for filepath, comp in sorted(components.items()):

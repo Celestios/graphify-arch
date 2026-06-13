@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from schema import AstNodeType, CodeNode, SemanticFacets, ContainsRelation, CallsRelation, ImplementsRelation
 from db import Database, Violation
+import networkx as nx
 
 class TestDatabase(unittest.TestCase):
     def setUp(self):
@@ -167,6 +168,37 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(res["count"], 1)
         self.assertEqual(res["results"][0]["id"], "A")
         self.assertEqual(res["results"][0]["summary"], "This is a test summary")
+
+    def test_sync_graph_metadata(self):
+        n1 = CodeNode(
+            id="src/main.dart::controller",
+            filepath="src/main.dart",
+            node_type=AstNodeType.CLASS,
+            start_byte=0, end_byte=100, ast_hash="h1", raw_code="",
+            semantics=SemanticFacets()
+        )
+        self.db.sync_nodes("src/main.dart", [n1])
+
+        G = nx.MultiDiGraph()
+        G.add_node("src/main.dart::controller",
+                    source_file="src/main.dart",
+                    arch_meta_layer="Application",
+                    arch_meta_tier=2,
+                    arch_meta_purity="IoBound",
+                    arch_meta_architectural_role="Controller",
+                    arch_meta_pattern="Notifier",
+                    arch_meta_ai_summary="Handles graph data")
+
+        root = Path(self.temp_dir)
+        self.db.sync_graph_metadata(G, root)
+
+        node = self.db.get_node("src/main.dart::controller")
+        self.assertEqual(node.semantics.fields.get("layer"), "Application")
+        self.assertEqual(node.semantics.fields.get("tier"), 2)
+        self.assertEqual(node.semantics.fields.get("purity"), "IoBound")
+        self.assertEqual(node.semantics.fields.get("architectural_role"), "Controller")
+        self.assertEqual(node.semantics.fields.get("pattern"), "Notifier")
+        self.assertEqual(node.ai_summary, "Handles graph data")
 
 if __name__ == "__main__":
     unittest.main()
