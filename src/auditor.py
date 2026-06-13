@@ -1,3 +1,4 @@
+import sys
 import networkx as nx
 from pathlib import Path
 from typing import List, Dict, Any
@@ -8,6 +9,7 @@ from utils import resolve_relative_path
 def audit_architecture_rules(G: nx.MultiDiGraph, ontology: OntologyConfig, root: Path) -> List[Violation]:
     """Runs structural audits against configured architectural rules on call/import graphs."""
     violations = []
+    skipped_count = 0
     
     # 1. Run rule-based checking for dependency_check fields
     for u, v, edge_data in G.edges(data=True):
@@ -26,6 +28,7 @@ def audit_architecture_rules(G: nx.MultiDiGraph, ontology: OntologyConfig, root:
             v_val = G.nodes[v].get(f"arch_meta_{field_name}")
             
             if u_val is None or v_val is None:
+                skipped_count += 1
                 continue
                 
             # Check rules
@@ -53,5 +56,8 @@ def audit_architecture_rules(G: nx.MultiDiGraph, ontology: OntologyConfig, root:
                 end_byte=data.get("end_byte", 0),
                 message=f"Component '{node_id}' requires manual architecture audit due to code/ontology schema changes."
             ))
+    
+    if skipped_count > 0 and not violations:
+        print(f"warning: {skipped_count} edge(s) skipped because node metadata was not assigned. Check your config.json assignment rules.", file=sys.stderr)
             
     return violations

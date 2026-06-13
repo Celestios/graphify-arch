@@ -16,7 +16,8 @@ from plugin_helpers import PluginCLIHandler, PluginEmbeddingsManager, PluginRepo
 class ArchPlugin(PluginHookInterface):
     name = "arch"
 
-    def should_activate(self, root: Path) -> bool:
+    def should_activate(self, root) -> bool:
+        root = Path(root)
         from project import ConfigLoader
         try:
             self.config_path, self.db_path = ConfigLoader.find_config(root)
@@ -99,7 +100,8 @@ class ArchPlugin(PluginHookInterface):
                 
             data["weight"] = weight
 
-    def on_post_build(self, G, extraction: dict, root: Path):
+    def on_post_build(self, G, extraction: dict, root):
+        root = Path(root)
         try:
             ontology = self.load_ontology(root)
         except Exception:
@@ -301,7 +303,8 @@ class ArchPlugin(PluginHookInterface):
             traceback.print_exc()
             raise e
 
-    def on_post_analyze(self, G, communities: dict, analysis: dict, root: Path) -> dict:
+    def on_post_analyze(self, G, communities: dict, analysis: dict, root) -> dict:
+        root = Path(root)
         try:
             ontology = self.load_ontology(root)
         except Exception:
@@ -411,5 +414,6 @@ class ArchPlugin(PluginHookInterface):
             
         return analysis
 
-    def on_report(self, report_text: str, G, communities: dict, root: str) -> str:
+    def on_report(self, report_text: str, G, communities: dict, root) -> str:
+        root = Path(root)
         return PluginReportGenerator.generate_report(report_text, G, communities, root, self)
