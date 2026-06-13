@@ -1,16 +1,17 @@
 # graphify-arch
 
-Architecture enforcement plugin for [graphify](https://github.com/Celestios/graphify). Indexes code structure into a queryable graph database, enforces architectural layer/tier constraints, and provides semantic search over your codebase.
+Architecture enforcement plugin for [graphify](https://github.com/Celestios/graphify). An AI-agent-facing tool that lets agents index code structure, enforce architectural rules defined by the user, and query the resulting graph.
 
-## Features
+## What This Does
 
-- **Ontology-driven metadata** — Define manual and automatic fields per directory (layer, tier, architectural role, purity, etc.) in a JSON config
-- **Dependency rule enforcement** — Audit layer violations (e.g., Presentation calling Infrastructure) and tier violations
-- **Semantic propagation** — Purity and barrier-based metadata propagation across the call graph
-- **Weight-aware clustering** — Edge weights reflect architectural relationships for better community detection
-- **Semantic search** — Vector similarity search over code nodes using local ONNX embeddings
-- **Context compilation** — Extract subgraph neighborhoods around any node for LLM context
-- **MCP resource integration** — Arch reports exposed as MCP resources in the graphify server
+This plugin extends graphify with an architecture layer. When an AI agent runs graphify on a codebase, this plugin:
+
+1. **Indexes code** into a queryable graph database (nodes, edges, metadata)
+2. **Applies user-defined rules** — layer constraints, tier boundaries, dependency directions — from a simple JSON config
+3. **Audits violations** — detects when code breaks the architectural rules the user specified
+4. **Provides context** — compiles subgraph neighborhoods and semantic search for agents to understand code structure
+
+The agent reads the user's architectural intent (e.g., "Presentation cannot call Infrastructure directly") and encodes it in `graphify-out/arch/config.json`. The plugin then enforces those rules on every reindex.
 
 ## Requirements
 
