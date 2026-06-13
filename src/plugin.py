@@ -301,6 +301,8 @@ class ArchPlugin(PluginHookInterface):
 
             G = propagate_metadata(G, ontology, root)
             self._assign_edge_weights(G, ontology, root)
+            if db:
+                db.sync_graph_metadata(G, root)
             return G
         except Exception as e:
             import traceback
