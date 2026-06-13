@@ -852,6 +852,19 @@ Full documentation is available in the `references/` folder alongside this skill
         if skill_file.exists():
             try:
                 content = skill_file.read_text(encoding="utf-8")
+                original_content = content
+                
+                # Update old reference filenames to new arch- prefixed ones
+                old_refs = {
+                    "- `config.md`": "- `arch-config.md`",
+                    "- `commands.md`": "- `arch-commands.md`",
+                    "- `audit.md`": "- `arch-audit.md`",
+                    "- `context.md`": "- `arch-context.md`",
+                }
+                for old, new in old_refs.items():
+                    if old in content:
+                        content = content.replace(old, new)
+                
                 if "graphify-arch: Architecture Enforcement" not in content:
                     skill_section = """
 ---
@@ -896,6 +909,9 @@ Full documentation is available in the `references/` folder alongside this skill
                     new_content = content.rstrip() + "\n\n" + skill_section.strip() + "\n"
                     skill_file.write_text(new_content, encoding="utf-8")
                     print(f"  arch skill section added to {skill_file}")
+                elif content != original_content:
+                    skill_file.write_text(content, encoding="utf-8")
+                    print(f"  arch references updated in {skill_file}")
             except Exception as e:
                 print(f"warning: failed to write arch instructions to {skill_file}: {e}", file=sys.stderr)
 
