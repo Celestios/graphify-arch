@@ -624,14 +624,12 @@ Enforce architectural rules on a codebase. The AI agent defines layers, tiers, a
 
 ### References
 
-- `references/config.md` — full config schema, field types, assignment rules, handlers, examples
-- `references/commands.md` — all CLI commands with arguments and output format
-- `references/audit.md` — interpreting violations and fixing them
-- `references/context.md` — compiling subgraph context for LLM input
+Full documentation at https://github.com/Celestios/graphify-arch/tree/main/src/references:
+- `config.md` — full config schema, field types, assignment rules, handlers, examples
+- `commands.md` — all CLI commands with arguments and output format
+- `audit.md` — interpreting violations and fixing them
+- `context.md` — compiling subgraph context for LLM input
 """
-        # Source directory for reference files
-        src_refs_dir = Path(__file__).parent / "references"
-        
         for sf in skill_files:
             if not sf.exists():
                 continue
@@ -641,16 +639,6 @@ Enforce architectural rules on a codebase. The AI agent defines layers, tiers, a
                 if "graphify-arch: Architecture Enforcement" not in content:
                     new_content = content.rstrip() + "\n\n" + skill_section.strip() + "\n"
                     sf.write_text(new_content, encoding="utf-8")
-                
-                # Copy reference files
-                if src_refs_dir.exists():
-                    skill_dir = sf.parent
-                    refs_dir = skill_dir / "references"
-                    refs_dir.mkdir(parents=True, exist_ok=True)
-                    for ref_file in src_refs_dir.glob("*.md"):
-                        dst = refs_dir / ref_file.name
-                        if not dst.exists():
-                            dst.write_text(ref_file.read_text(encoding="utf-8"), encoding="utf-8")
             except Exception as e:
                 print(f"warning: failed to write skill to {sf}: {e}", file=sys.stderr)
 
