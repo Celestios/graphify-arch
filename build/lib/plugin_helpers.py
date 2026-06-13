@@ -55,9 +55,7 @@ Config:
 
         update_bulk_parser = subparsers.add_parser("update-bulk", help="Set manual compliance status for multiple components via a JSON file (alias of set-status-bulk)")
         update_bulk_parser.add_argument("json_file", help="Path to the JSON file containing status changes")
-
-        subparsers.add_parser("install", help="Install arch skill section and reference files to AI assistant configs")
-
+        
         parsed_args = parser.parse_args(args)
         
         if parsed_args.arch_command == "set-status":
@@ -313,12 +311,6 @@ Config:
                 sys.exit(1)
             else:
                 print("[OK] Referential integrity validation passed.")
-            sys.exit(0)
-
-        elif parsed_args.arch_command == "install":
-            from plugin_helpers import PluginReportGenerator
-            PluginReportGenerator.write_always_on_prompts(root, None, [], None)
-            print("Installed arch skill section and reference files.")
             sys.exit(0)
 
     @staticmethod
