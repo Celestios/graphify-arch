@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import hashlib
+import shutil
 import subprocess
 import numpy as np
 from pathlib import Path
@@ -317,8 +318,42 @@ Config:
 
         elif parsed_args.arch_command == "install":
             from plugin_helpers import PluginReportGenerator
-            PluginReportGenerator.write_always_on_prompts(root, None, [], None)
-            print("Installed arch skill section and reference files.")
+            
+            # Write to all known environments
+            all_env_skill_dirs = [
+                Path.home() / ".gemini" / "config" / "skills" / "graphify",
+                Path.home() / ".gemini" / "skills" / "graphify",
+                Path.home() / ".claude" / "skills" / "graphify",
+                Path.home() / ".codex" / "skills" / "graphify",
+                Path.home() / ".config" / "opencode" / "skills" / "graphify",
+                Path.home() / ".config" / "kilo" / "skills" / "graphify",
+                Path.home() / ".config" / "devin" / "skills" / "graphify",
+                Path.home() / ".copilot" / "skills" / "graphify",
+                Path.home() / ".openclaw" / "skills" / "graphify",
+                Path.home() / ".factory" / "skills" / "graphify",
+                Path.home() / ".trae" / "skills" / "graphify",
+                Path.home() / ".kiro" / "skills" / "graphify",
+                Path.home() / ".pi" / "agent" / "skills" / "graphify",
+                Path.home() / ".codebuddy" / "skills" / "graphify",
+                Path.home() / ".agents" / "skills" / "graphify",
+                root / ".agents" / "skills" / "graphify",
+                root / ".gemini" / "skills" / "graphify",
+                root / ".devin" / "skills" / "graphify",
+                root / ".opencode" / "skills" / "graphify",
+                root / ".codex" / "skills" / "graphify",
+                root / ".cursor" / "skills" / "graphify",
+            ]
+            
+            installed_count = 0
+            for env_dir in all_env_skill_dirs:
+                if env_dir.exists():
+                    PluginReportGenerator.post_env_installation_hook(env_dir, root)
+                    installed_count += 1
+            
+            if installed_count == 0:
+                print("No graphify skill directories found. Install graphify first, then run 'graphify arch install'.")
+            else:
+                print(f"Installed arch skill section and reference files to {installed_count} environment(s).")
             sys.exit(0)
 
     @staticmethod
@@ -502,6 +537,29 @@ class PluginEmbeddingsManager:
 
 class PluginReportGenerator:
     @staticmethod
+    def _copy_arch_references_to_skill_dir(skill_dir: Path) -> None:
+        """Copy arch reference files to a skill directory's references/ folder.
+        
+        This mirrors graphify's behavior of writing reference files locally
+        instead of referencing GitHub URLs.
+        """
+        import sys
+        refs_src = Path(__file__).parent / "references"
+        if not refs_src.exists():
+            print(f"warning: arch references source not found at {refs_src}", file=sys.stderr)
+            return
+            
+        refs_dst = skill_dir / "references"
+        refs_dst.mkdir(parents=True, exist_ok=True)
+        
+        for ref_file in refs_src.glob("*.md"):
+            dst_file = refs_dst / ref_file.name
+            try:
+                shutil.copy2(ref_file, dst_file)
+            except Exception as e:
+                print(f"warning: failed to copy reference {ref_file.name} to {refs_dst}: {e}", file=sys.stderr)
+
+    @staticmethod
     def write_always_on_prompts(root_path: Path, G, violations: list, ontology):
         # Update Rule Files (Intercept existing, append if not found)
         rule_files = [
@@ -588,10 +646,25 @@ class PluginReportGenerator:
         skill_files = [
             Path.home() / ".gemini" / "config" / "skills" / "graphify" / "SKILL.md",
             Path.home() / ".gemini" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".claude" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".codex" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".config" / "opencode" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".config" / "kilo" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".config" / "devin" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".copilot" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".openclaw" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".factory" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".trae" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".kiro" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".pi" / "agent" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".codebuddy" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".agents" / "skills" / "graphify" / "SKILL.md",
             root_path / ".agents" / "skills" / "graphify" / "SKILL.md",
             root_path / ".gemini" / "skills" / "graphify" / "SKILL.md",
             root_path / ".devin" / "skills" / "graphify" / "SKILL.md",
             root_path / ".opencode" / "skills" / "graphify" / "SKILL.md",
+            root_path / ".codex" / "skills" / "graphify" / "SKILL.md",
+            root_path / ".cursor" / "skills" / "graphify" / "SKILL.md",
         ]
         
         skill_section = """
@@ -624,7 +697,7 @@ Enforce architectural rules on a codebase. The AI agent defines layers, tiers, a
 
 ### References
 
-Full documentation at https://github.com/Celestios/graphify-arch/tree/main/src/references:
+Full documentation is available in the `references/` folder alongside this skill file:
 - `config.md` — full config schema, field types, assignment rules, handlers, examples
 - `commands.md` — all CLI commands with arguments and output format
 - `audit.md` — interpreting violations and fixing them
@@ -639,8 +712,79 @@ Full documentation at https://github.com/Celestios/graphify-arch/tree/main/src/r
                 if "graphify-arch: Architecture Enforcement" not in content:
                     new_content = content.rstrip() + "\n\n" + skill_section.strip() + "\n"
                     sf.write_text(new_content, encoding="utf-8")
+                
+                # Copy arch references to the skill directory
+                PluginReportGenerator._copy_arch_references_to_skill_dir(sf.parent)
             except Exception as e:
                 print(f"warning: failed to write skill to {sf}: {e}", file=sys.stderr)
+
+    @staticmethod
+    def post_env_installation_hook(env_skill_dir: Path, root_path: Path = None) -> None:
+        """Post environment installation hook that writes arch instructions.
+        
+        This hook is called after graphify installs to an environment.
+        It writes arch references and instructions only for the environment
+        that was just installed.
+        
+        Args:
+            env_skill_dir: Path to the environment's skill directory (e.g., ~/.claude/skills/graphify/)
+            root_path: Optional project root path for project-scoped installations
+        """
+        import sys
+        
+        if not env_skill_dir.exists():
+            return
+            
+        # Copy arch references to the skill directory
+        PluginReportGenerator._copy_arch_references_to_skill_dir(env_skill_dir)
+        
+        # Write arch instructions to the skill file if it exists
+        skill_file = env_skill_dir / "SKILL.md"
+        if skill_file.exists():
+            try:
+                content = skill_file.read_text(encoding="utf-8")
+                if "graphify-arch: Architecture Enforcement" not in content:
+                    skill_section = """
+---
+
+## graphify-arch: Architecture Enforcement
+
+### What graphify-arch is for
+
+Enforce architectural rules on a codebase. The AI agent defines layers, tiers, and dependency constraints in `graphify-out/arch/config.json`. The plugin enforces them on every graphify run and reports violations.
+
+### Usage
+
+| Command | Description |
+|---------|-------------|
+| `graphify arch` | Show help and available commands |
+| `graphify arch audit` | Check all files for architectural violations |
+| `graphify arch set-status <file> <status> [msg]` | Override compliance status for a file |
+| `graphify arch set-status-bulk <json-file>` | Bulk-set manual status overrides |
+| `graphify arch analyze` | Validate config syntax and consistency |
+| `graphify arch setup-embeddings` | Download ONNX embedding model |
+
+### Agent workflow
+
+1. **Analyze the codebase** — understand directory structure, identify natural layers
+2. **Generate `graphify-out/arch/config.json`** — define fields, assignment rules, and dependency constraints
+3. **Before code changes** — `graphify arch audit` to check for existing violations
+4. **After code changes** — `graphify arch audit` to verify compliance
+5. **Override intentional violations** — `graphify arch set-status <file> COMPLIANT "reason"`
+
+### References
+
+Full documentation is available in the `references/` folder alongside this skill file:
+- `config.md` — full config schema, field types, assignment rules, handlers, examples
+- `commands.md` — all CLI commands with arguments and output format
+- `audit.md` — interpreting violations and fixing them
+- `context.md` — compiling subgraph context for LLM input
+"""
+                    new_content = content.rstrip() + "\n\n" + skill_section.strip() + "\n"
+                    skill_file.write_text(new_content, encoding="utf-8")
+                    print(f"  arch skill section added to {skill_file}")
+            except Exception as e:
+                print(f"warning: failed to write arch instructions to {skill_file}: {e}", file=sys.stderr)
 
     @staticmethod
     def generate_report(report_text: str, G, communities: dict, root: str, plugin_instance) -> str:
