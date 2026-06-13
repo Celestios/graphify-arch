@@ -13,23 +13,21 @@ This plugin extends graphify with an architecture layer. When an AI agent runs g
 
 The AI agent reads the user's architectural intent (e.g., "Presentation cannot call Infrastructure directly") and encodes it in `graphify-out/arch/config.json`. The plugin then enforces those rules on every reindex.
 
-## Requirements
-
-- Python >= 3.10
-- [graphify](https://github.com/Celestios/graphify) (custom fork with plugin hooks)
-
 ## Installation
 
 ```bash
-# Install graphify fork first
-git clone https://github.com/Celestios/graphify.git
-cd graphify
-pip install -e .
+# Recommended: install graphify fork with arch plugin included
+uv tool install --from "git+https://github.com/Celestios/graphify.git" "graphifyy[arch]"
+```
 
-# Install graphify-arch
-git clone https://github.com/Celestios/graphify-arch.git
-cd graphify-arch
-pip install -e .
+Or install separately:
+
+```bash
+# Install graphify fork
+uv tool install --from "git+https://github.com/Celestios/graphify.git" graphifyy
+
+# Install arch plugin in the same environment
+uv pip install --python "$(uv tool dir)/graphifyy/Scripts/python.exe" "git+https://github.com/Celestios/graphify-arch.git"
 ```
 
 ## Quick Start
@@ -40,13 +38,10 @@ graphify extract /path/to/your/project
 
 # 2. The AI agent generates graphify-out/arch/config.json with ontology rules
 
-# 3. Reindex with architecture metadata
-graphify arch reindex
-
-# 4. Audit for violations
+# 3. Audit for violations
 graphify arch audit
 
-# 5. Query the graph
+# 4. Query the graph
 graphify arch query-file --path src/my_module.py --methods
 ```
 
@@ -80,17 +75,18 @@ Place `graphify-out/arch/config.json` in your project. Define per-directory fiel
 }
 ```
 
+The AI agent should discuss architectural rules with you before writing this file. See `references/config.md` for the full schema.
+
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `graphify arch reindex` | Scan workspace, update DB graph with arch metadata |
-| `graphify arch audit` | Audit architectural rules and report violations |
-| `graphify arch query-file --path <file>` | Query nodes for a specific file |
-| `graphify arch compile-context --target <id>` | Compile subgraph context for LLM input |
-| `graphify arch semantic-search --query <text>` | Vector similarity search over code nodes |
-| `graphify arch get-dirty-nodes` | List nodes needing summary regeneration |
-| `graphify arch update-nodes --payload-file <file>` | Batch update node metadata |
+| `graphify arch` | Show help and available commands |
+| `graphify arch audit` | Check all files for architectural violations |
+| `graphify arch set-status <file> <status> [msg]` | Override compliance status for a file |
+| `graphify arch set-status-bulk <json-file>` | Bulk-set manual status overrides |
+| `graphify arch analyze` | Validate ontology config syntax and consistency |
+| `graphify arch setup-embeddings` | Download ONNX embedding model for semantic search |
 
 ## License
 
