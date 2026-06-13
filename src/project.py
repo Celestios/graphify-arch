@@ -44,6 +44,7 @@ class ConfigLoader:
         for rule_data in f_data.get("assignment_rules", []):
             conds_data = rule_data.get("conditions", {})
             conds = AssignmentCondition(
+                file_name=conds_data.get("file_name"),
                 path_prefix=conds_data.get("path_prefix"),
                 class_suffix=conds_data.get("class_suffix"),
                 class_contains=conds_data.get("class_contains"),
@@ -156,6 +157,7 @@ class ConfigLoader:
                     for rule_data in field_data.get("assignment_rules", []):
                         conds_data = rule_data.get("conditions", {})
                         conds = AssignmentCondition(
+                            file_name=conds_data.get("file_name"),
                             path_prefix=conds_data.get("path_prefix"),
                             class_suffix=conds_data.get("class_suffix"),
                             class_contains=conds_data.get("class_contains"),

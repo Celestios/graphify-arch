@@ -75,5 +75,31 @@ class TestAuditor(unittest.TestCase):
         self.assertEqual(v.filepath, "src/a.rs")
         self.assertEqual(v.message, "Component 'A' requires manual architecture audit due to code/ontology schema changes.")
 
+    def test_audit_directed_edge_preserves_direction(self):
+        rule = FieldRuleConfig(
+            source="Domain",
+            target="Presentation",
+            message="Domain must not depend on Presentation",
+            severity="error"
+        )
+        layer_cfg = FieldConfig(
+            values=["Domain", "Presentation"],
+            default="Domain",
+            handler="dependency_check",
+            rules=[rule]
+        )
+        dir_cfg = DirectoryConfig(automatic_fields={"layer": layer_cfg})
+        ontology = OntologyConfig(directories={".": dir_cfg})
+
+        G = nx.MultiDiGraph()
+        G.add_node("A", source_file="src/a.dart", arch_meta_layer="Domain", start_byte=0, end_byte=50)
+        G.add_node("B", source_file="src/b.dart", arch_meta_layer="Presentation")
+        G.add_edge("A", "B", type="calls")
+
+        violations = audit_architecture_rules(G, ontology, Path("src"))
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].source_id, "A")
+        self.assertEqual(violations[0].target_id, "B")
+
 if __name__ == "__main__":
     unittest.main()

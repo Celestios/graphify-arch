@@ -136,9 +136,9 @@ Config:
             if "links" not in _raw and "edges" in _raw:
                 _raw = dict(_raw, links=_raw["edges"])
             try:
-                G = json_graph.node_link_graph(_raw, edges="links")
+                G = json_graph.node_link_graph(_raw, directed=True, edges="links")
             except TypeError:
-                G = json_graph.node_link_graph(_raw)
+                G = json_graph.node_link_graph(_raw, directed=True)
             
             # Run metadata annotation before auditing
             from plugins import discover_plugins, run_hook
@@ -418,12 +418,16 @@ Config:
                     if parsed_args.classes and n.node_type in (AstNodeType.STRUCT, AstNodeType.CLASS):
                         match = True
                 if match:
-                    results.append({
+                    result = {
                         "id": n.id,
                         "filepath": n.filepath,
                         "node_type": n.node_type.value,
                         "raw_code": n.raw_code if parsed_args.include_body else None
-                    })
+                    }
+                    sem = n.semantics
+                    for field_name in ("layer", "tier", "purity", "architectural_role", "pattern"):
+                        result[field_name] = sem.fields.get(field_name, "Unknown")
+                    results.append(result)
             print(json.dumps(results, indent=2))
             sys.exit(0)
 

@@ -250,6 +250,10 @@ class ArchPlugin(PluginHookInterface):
                             if not rel_source_file.startswith(conds.path_prefix):
                                 match = False
                         
+                        if conds.file_name is not None:
+                            if Path(rel_source_file).name != conds.file_name:
+                                match = False
+                        
                         if conds.class_suffix is not None:
                             if not node_label.endswith(conds.class_suffix):
                                 match = False

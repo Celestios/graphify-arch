@@ -19,6 +19,7 @@ from schema import (
     ProjectConfig,
     CodeNode,
 )
+import json
 
 class TestSchema(unittest.TestCase):
     def test_ast_node_type_from_str(self):
@@ -95,6 +96,59 @@ class TestSchema(unittest.TestCase):
 
         fields = ontology.get_fields_for_file("src/main.rs")
         self.assertEqual(fields, {"m": manual_f, "a": auto_f})
+
+    def test_assignment_condition_file_name(self):
+        cond = AssignmentCondition(file_name="main.dart")
+        self.assertEqual(cond.file_name, "main.dart")
+        self.assertIsNone(cond.path_prefix)
+
+    def test_assignment_condition_all_none_fields(self):
+        cond = AssignmentCondition()
+        self.assertIsNone(cond.file_name)
+        self.assertIsNone(cond.path_prefix)
+        self.assertIsNone(cond.class_suffix)
+        self.assertIsNone(cond.class_contains)
+        self.assertIsNone(cond.name_contains)
+        self.assertIsNone(cond.imports_prefix)
+        self.assertIsNone(cond.calls_prefix)
+
+    def test_metadata_assignment_rule_with_file_name(self):
+        cond = AssignmentCondition(file_name="main.dart")
+        rule = MetadataAssignmentRule(value="EntryPoint", conditions=cond)
+        self.assertEqual(rule.value, "EntryPoint")
+        self.assertEqual(rule.conditions.file_name, "main.dart")
+
+    def test_config_loader_parses_file_name_condition(self):
+        from project import ConfigLoader
+        import tempfile, os
+
+        config = {
+            "lib": {
+                "automatic_fields": {
+                    "layer": {
+                        "values": ["A", "B"],
+                        "default": "A",
+                        "assignment_rules": [
+                            {"value": "B", "conditions": {"file_name": "special.dart"}}
+                        ]
+                    }
+                }
+            }
+        }
+
+        fd, tmp_path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(config, f)
+            project_config = ConfigLoader.load(Path(tmp_path))
+            ontology = project_config.ontology
+            fields = ontology.get_automatic_fields_for_file("lib/anything.dart")
+            layer_rules = fields["layer"].assignment_rules
+            self.assertEqual(len(layer_rules), 1)
+            self.assertEqual(layer_rules[0].value, "B")
+            self.assertEqual(layer_rules[0].conditions.file_name, "special.dart")
+        finally:
+            os.unlink(tmp_path)
 
 if __name__ == "__main__":
     unittest.main()
