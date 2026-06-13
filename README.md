@@ -16,8 +16,18 @@ The AI agent reads the user's architectural intent (e.g., "Presentation cannot c
 ## Installation
 
 ```bash
-# Install graphify fork (includes arch plugin + MCP)
-uv tool install "git+https://github.com/Celestios/graphify.git@v0.8.40"
+# Install graphify fork with arch plugin included
+uv tool install "graphifyy[arch] @ git+https://github.com/Celestios/graphify.git@v0.8.40"
+```
+
+Or install separately:
+
+```bash
+# Install graphify fork only
+uv tool install "graphifyy @ git+https://github.com/Celestios/graphify.git@v0.8.40"
+
+# Install arch plugin in the same environment
+uv pip install --python "$(uv tool dir)/graphifyy/Scripts/python.exe" "git+https://github.com/Celestios/graphify-arch.git@v0.1.3"
 ```
 
 Then set up the skill:
