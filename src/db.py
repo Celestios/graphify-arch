@@ -69,6 +69,22 @@ class Database:
             "ast_hash": row['ast_hash']
         }
 
+    def get_all_components(self) -> Dict[str, Dict[str, Any]]:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT filepath, status, manual_status, manual_fields, ast_hash FROM components")
+        components = {}
+        for row in cursor.fetchall():
+            manual_fields = json.loads(row['manual_fields']) if row['manual_fields'] else {}
+            violations = self._get_violations(row['filepath'])
+            components[row['filepath']] = {
+                "status": row['status'],
+                "manual_status": row['manual_status'],
+                "manual_fields": manual_fields,
+                "violations": violations,
+                "ast_hash": row['ast_hash']
+            }
+        return components
+
     def _get_violations(self, filepath: str) -> List[Dict[str, Any]]:
         cursor = self.conn.cursor()
         cursor.execute(

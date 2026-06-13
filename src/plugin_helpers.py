@@ -175,8 +175,7 @@ class PluginCLIHandler:
                 db = Database(str(db_path))
                 db.update_violations_and_statuses(violations, ontology, root, G)
                 
-                db_data = db._load_db_json()
-                components = db_data.get("components", {})
+                components = db.get_all_components()
                 for filepath, comp in sorted(components.items()):
                     status = comp.get("status")
                     if status in ("VIOLATION_DETECTED", "PENDING_AUDIT"):

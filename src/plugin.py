@@ -4,7 +4,7 @@ from pathlib import Path
 import networkx as nx
 
 from plugins import PluginHookInterface
-from db import Violation
+from db import Violation, Database
 from propagator import propagate_metadata
 from auditor import audit_architecture_rules
 from schema import OntologyConfig, FieldConfig, FieldRuleConfig, AssignmentCondition, MetadataAssignmentRule
@@ -18,10 +18,11 @@ class ArchPlugin(PluginHookInterface):
 
     def should_activate(self, root: Path) -> bool:
         from project import ConfigLoader
-        self.config_path, self.db_path = ConfigLoader.find_config(root)
-        if not self.config_path.exists():
-            print("Error: graphify-out/arch/config.json not found. You must write an ontology config in graphify-out/arch/config.json.", file=sys.stderr)
-            return False
+        try:
+            self.config_path, self.db_path = ConfigLoader.find_config(root)
+        except Exception:
+            self.config_path = root / "graphify-out" / "arch" / "config.json"
+            self.db_path = root / "graphify-out" / "arch" / "graph.db"
         return True
 
     def handle_cli(self, args: list[str]) -> bool:
@@ -30,6 +31,9 @@ class ArchPlugin(PluginHookInterface):
             return False
         cmd = args[0]
         if cmd == "arch":
+            if not self.config_path.exists():
+                print("Error: graphify-out/arch/config.json not found. Create it with the AI agent or write an ontology config manually.", file=sys.stderr)
+                sys.exit(1)
             PluginCLIHandler.handle_arch_cli(Path.cwd(), args[1:], self)
             sys.exit(0)
         elif cmd == "query" and "--semantic" in args:
@@ -97,11 +101,8 @@ class ArchPlugin(PluginHookInterface):
 
         try:
             # Resolve Database path and load
-            from project import ConfigLoader
-            from db import Database
             try:
-                config_path, db_path = ConfigLoader.find_config(root)
-                db = Database(str(db_path))
+                db = Database(str(self.db_path))
             except Exception:
                 db = None
 
@@ -302,16 +303,11 @@ class ArchPlugin(PluginHookInterface):
 
         violations = audit_architecture_rules(G, ontology, root)
         
-        # Load Database to sync violations and recalculate statuses
-        from project import ConfigLoader
-        from db import Database
         try:
-            config_path, db_path = ConfigLoader.find_config(root)
-            db = Database(str(db_path))
+            db = Database(str(self.db_path))
             all_violations = db.update_violations_and_statuses(violations, ontology, root, G)
             
-            db_data = db._load_db_json()
-            components = db_data.get("components", {})
+            components = db.get_all_components()
             
             file_level_violations = []
             for filepath, comp in sorted(components.items()):
