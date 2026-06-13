@@ -1,6 +1,6 @@
 # graphify-arch
 
-Architecture enforcement plugin for [graphify](https://github.com/Celestios/graphify). An AI-agent-facing tool that lets agents index code structure, enforce architectural rules defined by the user, and query the resulting graph.
+Architecture enforcement plugin for [graphify](https://github.com/Celestios/graphify) (fork). An AI-agent-facing tool that lets agents index code structure, enforce architectural rules defined by the user, and query the resulting graph.
 
 ## What This Does
 
@@ -16,25 +16,25 @@ The AI agent reads the user's architectural intent (e.g., "Presentation cannot c
 ## Installation
 
 ```bash
-# Recommended: install graphify fork with arch plugin included
-uv tool install --from "git+https://github.com/Celestios/graphify.git" "graphifyy[arch]"
+# Install graphify fork (includes arch plugin + MCP)
+uv tool install "git+https://github.com/Celestios/graphify.git@v0.8.40"
 ```
 
-Or install separately:
+Then set up the skill:
 
 ```bash
-# Install graphify fork
-uv tool install --from "git+https://github.com/Celestios/graphify.git" graphifyy
+# Install skill for your AI assistant
+graphify install --platform antigravity
 
-# Install arch plugin in the same environment
-uv pip install --python "$(uv tool dir)/graphifyy/Scripts/python.exe" "git+https://github.com/Celestios/graphify-arch.git"
+# Install arch plugin references and instructions
+graphify arch install
 ```
 
 ## Quick Start
 
 ```bash
 # 1. Run graphify on your project to generate the graph
-graphify extract /path/to/your/project
+graphify .
 
 # 2. The AI agent generates graphify-out/arch/config.json with ontology rules
 
@@ -42,7 +42,7 @@ graphify extract /path/to/your/project
 graphify arch audit
 
 # 4. Query the graph
-graphify arch query-file --path src/my_module.py --methods
+graphify arch query-file --path lib/src/my_file.dart --methods
 ```
 
 ## Ontology Config
@@ -75,7 +75,7 @@ Place `graphify-out/arch/config.json` in your project. Define per-directory fiel
 }
 ```
 
-The AI agent should discuss architectural rules with you before writing this file. See `references/config.md` for the full schema.
+The AI agent should discuss architectural rules with you before writing this file. See `references/arch-config.md` for the full schema.
 
 ## CLI Commands
 
@@ -84,9 +84,14 @@ The AI agent should discuss architectural rules with you before writing this fil
 | `graphify arch` | Show help and available commands |
 | `graphify arch audit` | Check all files for architectural violations |
 | `graphify arch set-status <file> <status> [msg]` | Override compliance status for a file |
-| `graphify arch set-status-bulk <json-file>` | Bulk-set manual status overrides |
-| `graphify arch analyze` | Validate ontology config syntax and consistency |
-| `graphify arch setup-embeddings` | Download ONNX embedding model for semantic search |
+| `graphify arch update-component <json-file>` | Update component metadata from JSON |
+| `graphify arch discover-ontology` | Print current ontology config |
+| `graphify arch query-file --path <file>` | Query nodes for a specific file |
+| `graphify arch compile-context --target <id>` | Compile subgraph context for LLM input |
+| `graphify arch semantic-search --query <text>` | Vector similarity search over code |
+| `graphify arch analyze` | Validate config syntax and consistency |
+| `graphify arch setup-embeddings` | Download ONNX embedding model |
+| `graphify arch install` | Install arch skill section and references |
 
 ## License
 
