@@ -1,134 +1,81 @@
 import os
 import sys
 import json
-import time
-import queue
-import subprocess
 from pathlib import Path
-from typing import List, Set, Dict, Any
+from typing import List, Dict, Any
 
 import dataclasses
-from schema import OntologyConfig, CodeNode, ContainsRelation, AstNodeType
+from networkx.readwrite import json_graph
+from schema import OntologyConfig, AstNodeType
 from project import Workspace
 from db import Database
 from embedder import LocalEmbedder
-from parser import AstParser
 from compiler import ContextCompiler
 import cli
-
-# Attempt to load filesystem event monitoring library
-try:
-    from watchdog.observers import Observer
-    from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileCreatedEvent, FileDeletedEvent
-except ImportError:
-    print("Error: 'watchdog' dependency missing. Run: pip install watchdog",
-          file=sys.stderr)
-    sys.exit(1)
 
 
 def load_ontology_from_workspace(workspace: Workspace) -> OntologyConfig:
     return workspace.config.ontology
 
 
-def get_git_head(dir_str: str) -> str:
-    """Retrieves the current git repository HEAD hash."""
+def load_graph_from_json(root: Path) -> Any:
+    """Loads the NetworkX graph from graphify's graph.json output."""
+    graph_path = root / "graphify-out" / "graph.json"
+    if not graph_path.exists():
+        raise FileNotFoundError(f"graph.json not found at {graph_path}. Run graphify first.")
+    with open(graph_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if "links" not in raw and "edges" in raw:
+        raw = dict(raw, links=raw["edges"])
     try:
-        res = subprocess.run(["git", "rev-parse", "HEAD"],
-                             capture_output=True,
-                             text=True,
-                             cwd=dir_str,
-                             check=True)
-        return res.stdout.strip()
-    except Exception:
-        return ""
+        return json_graph.node_link_graph(raw, edges="links")
+    except TypeError:
+        return json_graph.node_link_graph(raw)
 
 
-def force_full_reindex(workspace: Workspace, database: Database,
-                       ontology: OntologyConfig) -> None:
-    """Forces a complete evaluation of all tracked files within the workspace repository topology."""
-    try:
-        res = subprocess.run(["git", "ls-files"],
-                             capture_output=True,
-                             text=True,
-                             cwd=str(workspace.root_dir),
-                             check=True)
-    except Exception:
-        return
+def sync_graph_to_database(database: Database, G) -> None:
+    """Synchronizes a NetworkX graph into the SQLite database."""
+    from schema import CodeNode, SemanticFacets
+    cursor = database.conn.cursor()
+    cursor.execute("DELETE FROM nodes")
+    cursor.execute("DELETE FROM edges")
+    database.conn.commit()
 
-    parsed_nodes: List[CodeNode] = []
-    parsed_relations: List[Any] = []
-
-    for line in res.stdout.splitlines():
-        path = workspace.root_dir / line
-        if not path.exists() or workspace.is_excluded(str(path)):
+    for node_id, data in G.nodes(data=True):
+        filepath = data.get("source_file", "")
+        if not filepath:
             continue
+        node_type_str = data.get("type") or "Function"
+        try:
+            node_type = AstNodeType.from_str(node_type_str)
+        except Exception:
+            node_type = AstNodeType.FUNCTION
+        semantics_data = {}
+        for key in data:
+            if key.startswith("arch_meta_"):
+                field_name = key[len("arch_meta_"):]
+                semantics_data[field_name] = data[key]
+        semantics = SemanticFacets(**semantics_data) if semantics_data else SemanticFacets()
+        cursor.execute(
+            """INSERT OR REPLACE INTO nodes
+               (id, filepath, node_type, start_byte, end_byte, ast_hash, semantics, ai_summary, raw_code, previous_code, is_dirty)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (node_id, filepath, node_type.value,
+             data.get("start_byte", 0), data.get("end_byte", 0),
+             data.get("ast_hash", ""),
+             json.dumps(dataclasses.asdict(semantics)),
+             data.get("ai_summary"),
+             data.get("raw_code", ""),
+             None, 0)
+        )
 
-        path_str = str(path)
-        if path_str.endswith(".rs") or path_str.endswith(".dart"):
-            try:
-                content = path.read_text(encoding="utf-8")
-                nodes, relations = AstParser.parse_file(path_str, content)
-                parsed_nodes.extend(nodes)
-                parsed_relations.extend(relations)
-            except Exception:
-                continue
-
-    file_groups: Dict[str, List[CodeNode]] = {}
-    for node in parsed_nodes:
-        file_groups.setdefault(node.filepath, []).append(node)
-
-    for filepath, nodes in file_groups.items():
-        database.sync_nodes(filepath, nodes)
-
-    database.resolve_and_sync_relations(parsed_relations, None)
-    database.propagate_semantics(ontology)
-
-
-def ingest_git_delta(dir_str: str, workspace: Workspace,
-                     all_nodes: List[CodeNode], all_relations: List[Any],
-                     affected_files: Set[str]) -> None:
-    """Scans for untracked, modified, or deleted git file indices to minimize translation pass times."""
-    res = subprocess.run([
-        "git", "ls-files", "--modified", "--others", "--deleted",
-        "--exclude-standard"
-    ],
-                         capture_output=True,
-                         text=True,
-                         cwd=dir_str,
-                         check=True)
-
-    for line in res.stdout.splitlines():
-        path = Path(dir_str) / line
-        path_str = str(path)
-
-        if workspace.is_excluded(path_str):
-            continue
-
-        if path_str.endswith(".rs") or path_str.endswith(".dart"):
-            affected_files.add(path_str)
-
-            if not path.exists():
-                continue
-
-            try:
-                content = path.read_text(encoding="utf-8")
-                nodes, relations = AstParser.parse_file(path_str, content)
-                all_nodes.extend(nodes)
-                all_relations.extend(relations)
-            except Exception as e:
-                print(f"Parser error on file {path_str}: {e}", file=sys.stderr)
-
-
-class WorkspaceWatchHandler(FileSystemEventHandler):
-    """Bridges low-level file modifications into the synchronized pipeline queue."""
-
-    def __init__(self, event_queue: queue.Queue):
-        self.event_queue = event_queue
-
-    def on_any_event(self, event):
-        if isinstance(event,
-                       (FileModifiedEvent, FileCreatedEvent, FileDeletedEvent)):
-            self.event_queue.put(event.src_path)
+    for u, v, edge_data in G.edges(data=True):
+        edge_type = edge_data.get("type", edge_data.get("relation", "Calls"))
+        cursor.execute(
+            "INSERT OR IGNORE INTO edges (source_id, target_id, edge_type) VALUES (?, ?, ?)",
+            (u, v, edge_type)
+        )
+    database.conn.commit()
 
 
 # Command Dispatch Handlers
@@ -136,12 +83,12 @@ class WorkspaceWatchHandler(FileSystemEventHandler):
 def handle_init(args) -> None:
     from scaffolder import scaffold_project
     current_dir = Path.cwd().resolve()
-    dot_arch = current_dir / ".arch"
-    dot_arch.mkdir(parents=True, exist_ok=True)
+    arch_dir = current_dir / "graphify-out" / "arch"
+    arch_dir.mkdir(parents=True, exist_ok=True)
 
     default_config = scaffold_project(current_dir)
-    config_path = dot_arch / "arch.json"
-    
+    config_path = arch_dir / "config.json"
+
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(default_config, f, indent=4)
     print(f"Initialized Graphify-Arch workspace at {config_path}")
@@ -153,21 +100,22 @@ def handle_discover_ontology(args, workspace, database) -> None:
 
 def handle_reindex(args, workspace, database) -> None:
     from plugins import discover_plugins, run_hook
+
+    G = load_graph_from_json(workspace.root_dir)
+    sync_graph_to_database(database, G)
+
     plugins = discover_plugins(workspace.root_dir)
-    
-    force_full_reindex(workspace, database, workspace.config.ontology)
-    
-    # Trigger post-build plugin hooks and save semantic mutations
-    G = database.get_graph()
     G = run_hook(plugins, "on_post_build", G, {}, workspace.root_dir)
-    
+
     cursor = database.conn.cursor()
     for node_id in G.nodes:
-        new_sem = G.nodes[node_id]['data'].semantics
-        cursor.execute("UPDATE nodes SET semantics = ? WHERE id = ?",
-                       (json.dumps(dataclasses.asdict(new_sem)), node_id))
+        node_data = G.nodes[node_id]
+        new_sem = node_data.get("data")
+        if new_sem and hasattr(new_sem, "semantics"):
+            cursor.execute("UPDATE nodes SET semantics = ? WHERE id = ?",
+                           (json.dumps(dataclasses.asdict(new_sem.semantics)), node_id))
     database.conn.commit()
-    
+
     print("Reindexing and ontology semantic propagation completed.")
 
 
@@ -190,14 +138,14 @@ def handle_audit(args, workspace, database) -> None:
     from auditor import audit_architecture_rules
     from plugins import discover_plugins, run_hook
     plugins = discover_plugins(workspace.root_dir)
-    
+
     G = database.get_graph()
     G = run_hook(plugins, "on_post_build", G, {}, workspace.root_dir)
-    
+
     violations = audit_architecture_rules(G, workspace.config.ontology, workspace.root_dir)
     analysis = {"violations": [dataclasses.asdict(v) for v in violations]}
     analysis = run_hook(plugins, "on_post_analyze", G, {}, analysis, workspace.root_dir)
-    
+
     print(json.dumps(analysis, indent=2))
 
 
@@ -254,27 +202,6 @@ def handle_semantic_search(args, workspace, database) -> None:
     print(json.dumps(res, indent=2))
 
 
-def handle_watch(args, workspace, database) -> None:
-    print(f"Monitoring workspace {workspace.root_dir} for changes...")
-    event_queue = queue.Queue()
-    handler = WorkspaceWatchHandler(event_queue)
-    observer = Observer()
-    observer.schedule(handler, str(workspace.root_dir), recursive=True)
-    observer.start()
-    try:
-        while True:
-            time.sleep(1)
-            changed_files = set()
-            while not event_queue.empty():
-                changed_files.add(event_queue.get())
-            if changed_files:
-                print(f"Detected changes in: {list(changed_files)}. Reindexing...")
-                force_full_reindex(workspace, database, workspace.config.ontology)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
-
-
 def main() -> None:
     args = cli.parse_args()
 
@@ -294,7 +221,6 @@ def main() -> None:
         "query-file": handle_query_file,
         "update-nodes": handle_update_nodes,
         "semantic-search": handle_semantic_search,
-        "watch": handle_watch,
     }
 
     handler = handlers.get(args.command)
@@ -303,6 +229,8 @@ def main() -> None:
     else:
         print(f"Unknown command: {args.command}", file=sys.stderr)
         sys.exit(1)
+
+    database.close()
 
 
 if __name__ == "__main__":

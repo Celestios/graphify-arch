@@ -150,11 +150,4 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Maximum number of returned target matches.")
 
-    # Watch
-    subparsers.add_parser(
-        "watch",
-        help=
-        "Spin up persistent folder monitoring daemon to capture and sync ongoing structural mutations."
-    )
-
     return parser.parse_args()

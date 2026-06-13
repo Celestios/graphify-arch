@@ -6,20 +6,24 @@ build-backend = "setuptools.build_meta"
 name = "graphify-arch"
 version = "0.1.0"
 description = "Architecture enforcement plugin for graphify"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = ["graphify", "architecture", "code-analysis", "dependency-graph", "enforcement"]
 dependencies = [
-    "networkx",
-    "blake3",
-    "watchdog",
-    "numpy",
+    "networkx>=3.4",
+    "numpy>=1.21",
     "onnxruntime",
     "tokenizers",
-    "tree-sitter",
-    "tree-sitter-rust"
 ]
+
+[project.urls]
+Homepage = "https://github.com/Celestios/graphify-arch"
+Repository = "https://github.com/Celestios/graphify-arch"
 
 [project.entry-points."graphify.plugins"]
 arch = "plugin:ArchPlugin"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["plugin", "plugin_helpers", "plugins", "scaffolder", "propagator", "auditor", "embedder", "main", "cli", "compiler", "db", "project", "schema", "parser"]
+py-modules = ["plugin", "plugin_helpers", "plugins", "scaffolder", "propagator", "auditor", "embedder", "main", "cli", "compiler", "db", "project", "schema", "utils"]

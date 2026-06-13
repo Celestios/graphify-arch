@@ -224,7 +224,7 @@ class Workspace:
         config = ConfigLoader.load(config_path)
 
         return cls(
-            root_dir=config_path.parent.parent,
+            root_dir=config_path.parent.parent.parent,
             db_path=db_path,
             config_path=config_path,
             config=config
@@ -232,29 +232,25 @@ class Workspace:
 
     def is_excluded(self, filepath: str) -> bool:
         """Tests if a file path matches graphify ignore patterns or noise directories."""
-        from graphify.detect import _is_ignored, _is_noise_dir, _SKIP_FILES
-        
+        from graphify.detect import _is_ignored, _is_noise_dir, _SKIP_FILES, _load_graphifyignore
+
         path = Path(filepath).resolve()
-        
-        # Check if any parent component is a noise directory
+
         try:
             rel_parts = path.relative_to(self.root_dir).parts
         except ValueError:
             rel_parts = path.parts
-            
+
         parent_path = self.root_dir
         for part in rel_parts[:-1]:
             if _is_noise_dir(part, parent_path):
                 return True
             parent_path = parent_path / part
-            
-        # Check if the file name itself is a skipped file
+
         if path.name in _SKIP_FILES:
             return True
-            
-        # Check if it is ignored by graphifyignore / gitignore
+
         if not hasattr(self, "ignore_patterns"):
-            from graphify.detect import _load_graphifyignore
             self.ignore_patterns = _load_graphifyignore(self.root_dir)
-            
+
         return _is_ignored(path, self.root_dir, self.ignore_patterns)

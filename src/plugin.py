@@ -117,106 +117,51 @@ class ArchPlugin(PluginHookInterface):
             modified_files = set()
             if db:
                 try:
-                    db_data = db._load_db_json()
-                    components = db_data.setdefault("components", {})
-                    db_modified = False
-                    
-                    # Load graphify-out/graph.json to read previous nodes' hashes
-                    prev_nodes_by_file = {}
-                    graph_path = root / "graphify-out" / "graph.json"
-                    if graph_path.exists():
-                        try:
-                            with open(graph_path, "r", encoding="utf-8") as f:
-                                prev_graph = json.load(f)
-                            for node in prev_graph.get("nodes", []):
-                                sf = node.get("source_file")
-                                if sf:
-                                    rel_sf = resolve_relative_path(sf, root)
-                                    node_id = node.get("id")
-                                    node_hash = node.get("ast_hash")
-                                    if node_id and node_hash:
-                                        prev_nodes_by_file.setdefault(rel_sf, {})[node_id] = node_hash
-                        except Exception:
-                            pass
-
                     # Find all unique source files in the graph
                     graph_files = set()
                     for node_id in G.nodes:
                         sf = G.nodes[node_id].get("source_file")
                         if sf:
                             graph_files.add(resolve_relative_path(sf, root))
-                    
+
                     for rel_file in graph_files:
                         manifest_entry = manifest_data.get(rel_file)
                         curr_ast_hash = manifest_entry.get("ast_hash") if manifest_entry else None
-                        
-                        comp = components.get(rel_file)
+
+                        comp = db.get_component(rel_file)
                         if comp:
                             prev_ast_hash = comp.get("ast_hash")
                             if curr_ast_hash and prev_ast_hash != curr_ast_hash:
-                                # Manifest hash changed (Fast filter)
-                                # Now run the AST parser to check if there is an actual logic/code change
-                                actual_changed = True
-                                file_path = root / rel_file
-                                if file_path.exists():
-                                    try:
-                                        from parser import AstParser
-                                        content = file_path.read_text(encoding="utf-8")
-                                        new_nodes, _ = AstParser.parse_file(str(file_path), content)
-                                        
-                                        prev_nodes = prev_nodes_by_file.get(rel_file, {})
-                                        if prev_nodes:
-                                            new_nodes_map = {node.id: node.ast_hash for node in new_nodes}
-                                            if set(new_nodes_map.keys()) == set(prev_nodes.keys()):
-                                                if all(new_nodes_map[nid] == prev_nodes[nid] for nid in new_nodes_map):
-                                                    actual_changed = False # No actual logic change (whitespace/formatting only)
-                                    except Exception:
+                                modified_files.add(rel_file)
+
+                                existing_violations = comp.get("violations") or []
+                                filtered_violations = [v for v in existing_violations if v.get("origin") != "manual"]
+
+                                manual_cfg = ontology.get_manual_fields_for_file(rel_file)
+                                manual_fields = comp.get("manual_fields") or {}
+                                new_manual_fields = {}
+                                for field_name, val in manual_fields.items():
+                                    field_config = manual_cfg.get(field_name)
+                                    if field_config and field_config.reset_on_change:
                                         pass
-                                
-                                if actual_changed:
-                                    modified_files.add(rel_file)
-                                    
-                                    existing_violations = comp.get("violations") or []
-                                    filtered_violations = [v for v in existing_violations if v.get("origin") != "manual"]
-                                    comp["violations"] = filtered_violations
-                                    comp["manual_status"] = None
-                                    comp["status"] = "PENDING_AUDIT"
-                                    comp["ast_hash"] = curr_ast_hash
-                                    
-                                    # Reset manual fields configured with reset_on_change
-                                    manual_cfg = ontology.get_manual_fields_for_file(rel_file)
-                                    manual_fields = comp.get("manual_fields") or {}
-                                    new_manual_fields = {}
-                                    for field_name, val in manual_fields.items():
-                                        field_config = manual_cfg.get(field_name)
-                                        if field_config and field_config.reset_on_change:
-                                            pass
-                                        else:
-                                            new_manual_fields[field_name] = val
-                                    comp["manual_fields"] = new_manual_fields
-                                    db_modified = True
-                                else:
-                                    # Update ast_hash but do not reset fields/status as it's whitespace-only
-                                    comp["ast_hash"] = curr_ast_hash
-                                    db_modified = True
+                                    else:
+                                        new_manual_fields[field_name] = val
+
+                                db.save_component(rel_file, "PENDING_AUDIT", None, new_manual_fields, filtered_violations)
+                                cursor = db.conn.cursor()
+                                cursor.execute("UPDATE components SET ast_hash = ? WHERE filepath = ?", (curr_ast_hash, rel_file))
+                                db.conn.commit()
                             elif curr_ast_hash and not prev_ast_hash:
-                                comp["ast_hash"] = curr_ast_hash
-                                db_modified = True
+                                cursor = db.conn.cursor()
+                                cursor.execute("UPDATE components SET ast_hash = ? WHERE filepath = ?", (curr_ast_hash, rel_file))
+                                db.conn.commit()
                         else:
-                            # New component, register component in components mapping with default status and current hash
-                            components[rel_file] = {
-                                "status": "PENDING_AUDIT",
-                                "manual_status": None,
-                                "manual_fields": {},
-                                "violations": [],
-                                "ast_hash": curr_ast_hash
-                            }
-                            db_modified = True
-                    
-                    if db_modified:
-                        db._save_db_json(db_data)
+                            db.save_component(rel_file, "PENDING_AUDIT", None, {}, [])
+                            cursor = db.conn.cursor()
+                            cursor.execute("UPDATE components SET ast_hash = ? WHERE filepath = ?", (curr_ast_hash, rel_file))
+                            db.conn.commit()
                 except Exception as e:
-                    print(f"warning: failed to sync file-level changes in db.json: {e}", file=sys.stderr)
+                    print(f"warning: failed to sync file-level changes: {e}", file=sys.stderr)
 
             # Helper to check prefix matching including package: imports/calls
             def matches_prefix(target_str: str, prefix: str) -> bool:

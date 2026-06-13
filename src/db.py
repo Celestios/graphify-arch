@@ -36,116 +36,84 @@ class Database:
 
     def __init__(self, path: str):
         self.db_path = Path(path)
-        self.conn = sqlite3.connect(":memory:")
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
 
-    def _get_db_json_path(self) -> Path:
-        return self.db_path.parent / "db.json"
-
-    def _load_db_json(self) -> Dict[str, Any]:
-        p = self._get_db_json_path()
-        if not p.exists():
-            return {"components": {}}
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {"components": {}}
-
-    def _save_db_json(self, data: Dict[str, Any]):
-        p = self._get_db_json_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            
-        graph_path = self.db_path.parent.parent / "graph.json"
-        if graph_path.exists():
-            try:
-                with open(graph_path, "r", encoding="utf-8") as f:
-                    current_graph = json.load(f)
-            except Exception:
-                return
-                
-            from utils import resolve_relative_path
-            if self.db_path.parent.name == "arch":
-                root = self.db_path.parent.parent.parent
-            else:
-                root = self.db_path.parent.parent
-                
-            components = data.get("components", {})
-            meta_by_file = {}
-            for k, comp in components.items():
-                rel_k = resolve_relative_path(k, root)
-                meta_by_file[rel_k] = comp
-                
-            modified = False
-            for node in current_graph.get("nodes", []):
-                sf = node.get("source_file")
-                if sf:
-                    rel_sf = resolve_relative_path(sf, root)
-                    comp_meta = None
-                    if rel_sf in meta_by_file:
-                        comp_meta = meta_by_file[rel_sf]
-                    else:
-                        for k, comp in meta_by_file.items():
-                            if rel_sf.endswith(k) or k.endswith(rel_sf):
-                                comp_meta = comp
-                                break
-                    if comp_meta:
-                        status = comp_meta.get("status")
-                        if status:
-                            node["status"] = status
-                            
-                        manual_status = comp_meta.get("manual_status")
-                        if manual_status is not None:
-                            node["arch_meta_manual_status"] = manual_status
-                            
-                        manual_fields = comp_meta.get("manual_fields") or {}
-                        for fk, fv in manual_fields.items():
-                            node[f"arch_meta_{fk}"] = fv
-                            
-                        manual_violations = [v["message"] for v in comp_meta.get("violations", []) if v.get("origin") == "manual"]
-                        if manual_violations:
-                            node["arch_meta_manual_violations"] = " | ".join(manual_violations)
-                        else:
-                            node.pop("arch_meta_manual_violations", None)
-                            
-                        ast_hash = comp_meta.get("ast_hash")
-                        if ast_hash:
-                            node["ast_hash"] = ast_hash
-                            
-                        modified = True
-                        
-            if modified:
-                with open(graph_path, "w", encoding="utf-8") as f:
-                    json.dump(current_graph, f, indent=2, ensure_ascii=False)
+    def close(self):
+        if self.conn:
+            self.conn.close()
 
     def get_component(self, filepath: str) -> Optional[Dict[str, Any]]:
-        db_data = self._load_db_json()
-        components = db_data.get("components", {})
-        if filepath not in components:
-            for k in components:
-                if k.endswith(filepath) or filepath.endswith(k):
-                    return components[k]
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT filepath, status, manual_status, manual_fields, ast_hash FROM components WHERE filepath = ?",
+            (filepath,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute(
+                "SELECT filepath, status, manual_status, manual_fields, ast_hash FROM components WHERE filepath LIKE '%' || ? OR ? LIKE '%' || filepath",
+                (filepath, filepath))
+            row = cursor.fetchone()
+        if not row:
             return None
-        return components[filepath]
-
-    def save_component(self, filepath: str, status: str, manual_status: Optional[str], manual_fields: Dict[str, Any], violations: List[Dict[str, Any]]):
-        db_data = self._load_db_json()
-        components = db_data.setdefault("components", {})
-        existing = components.get(filepath) or {}
-        ast_hash = existing.get("ast_hash")
-        
-        components[filepath] = {
-            "status": status,
-            "manual_status": manual_status,
+        manual_fields = json.loads(row['manual_fields']) if row['manual_fields'] else {}
+        violations = self._get_violations(row['filepath'])
+        return {
+            "status": row['status'],
+            "manual_status": row['manual_status'],
             "manual_fields": manual_fields,
-            "violations": violations
+            "violations": violations,
+            "ast_hash": row['ast_hash']
         }
-        if ast_hash:
-            components[filepath]["ast_hash"] = ast_hash
-        self._save_db_json(db_data)
+
+    def _get_violations(self, filepath: str) -> List[Dict[str, Any]]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT origin, rule, message, source_node, target_node FROM component_violations WHERE filepath = ?",
+            (filepath,))
+        return [
+            {
+                "origin": r['origin'],
+                "rule": r['rule'],
+                "message": r['message'],
+                "source_node": r['source_node'],
+                "target_node": r['target_node']
+            }
+            for r in cursor.fetchall()
+        ]
+
+    def _set_violations(self, filepath: str, violations: List[Dict[str, Any]]):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM component_violations WHERE filepath = ?", (filepath,))
+        for v in violations:
+            cursor.execute(
+                "INSERT INTO component_violations (filepath, origin, rule, message, source_node, target_node) VALUES (?, ?, ?, ?, ?, ?)",
+                (filepath, v.get("origin", ""), v.get("rule", ""),
+                 v.get("message", ""), v.get("source_node", ""), v.get("target_node", "")))
+
+    def _upsert_component(self, filepath: str, status: str, manual_status: Optional[str],
+                          manual_fields: Dict[str, Any], ast_hash: Optional[str] = None):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO components (filepath, status, manual_status, manual_fields, ast_hash)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(filepath) DO UPDATE SET
+                   status = excluded.status,
+                   manual_status = excluded.manual_status,
+                   manual_fields = excluded.manual_fields,
+                   ast_hash = COALESCE(excluded.ast_hash, components.ast_hash)""",
+            (filepath, status, manual_status, json.dumps(manual_fields), ast_hash))
+
+    def save_component(self, filepath: str, status: str, manual_status: Optional[str],
+                       manual_fields: Dict[str, Any], violations: List[Dict[str, Any]]):
+        existing = self.get_component(filepath)
+        ast_hash = existing.get("ast_hash") if existing else None
+        self._upsert_component(filepath, status, manual_status, manual_fields, ast_hash)
+        self._set_violations(filepath, violations)
+        self.conn.commit()
 
     def set_component_status(self, filepath: str, status: str, violations_msg: str):
         comp = self.get_component(filepath)
@@ -155,37 +123,33 @@ class Database:
         else:
             manual_fields = {}
             existing_violations = []
-            
+
         filtered_violations = [v for v in existing_violations if v.get("origin") != "manual"]
         if violations_msg and status == "VIOLATION_DETECTED":
             filtered_violations.append({
                 "origin": "manual",
                 "message": violations_msg
             })
-            
+
         self.save_component(filepath, status, status, manual_fields, filtered_violations)
 
     def set_component_status_bulk(self, updates: Dict[str, Dict[str, Any]], ontology, root: Path):
         import sys
         from utils import resolve_relative_path
-        
-        db_data = self._load_db_json()
-        components = db_data.setdefault("components", {})
-        
+
         for raw_key, entry_data in updates.items():
             filepath = resolve_relative_path(raw_key, root)
-            
-            comp = None
+
+            comp = self.get_component(filepath)
             matched_key = filepath
-            if filepath in components:
-                comp = components[filepath]
-            else:
-                for k in components:
+            if not comp:
+                for row in self.conn.execute("SELECT filepath FROM components").fetchall():
+                    k = row['filepath']
                     if k.endswith(filepath) or filepath.endswith(k):
                         matched_key = k
-                        comp = components[k]
+                        comp = self.get_component(k)
                         break
-            
+
             if comp:
                 manual_fields = comp.get("manual_fields") or {}
                 existing_violations = comp.get("violations") or []
@@ -194,21 +158,21 @@ class Database:
                 manual_fields = {}
                 existing_violations = []
                 ast_hash = None
-                
+
             status = entry_data.get("status")
             violations_raw = entry_data.get("violations", "")
             if isinstance(violations_raw, list):
                 violations_msg = " | ".join(str(v) for v in violations_raw)
             else:
                 violations_msg = str(violations_raw) if violations_raw is not None else ""
-                
+
             filtered_violations = [v for v in existing_violations if v.get("origin") != "manual"]
             if violations_msg and status == "VIOLATION_DETECTED":
                 filtered_violations.append({
                     "origin": "manual",
                     "message": violations_msg
                 })
-                
+
             dir_fields = ontology.get_manual_fields_for_file(matched_key)
             for k, v in entry_data.items():
                 if k in dir_fields:
@@ -218,27 +182,21 @@ class Database:
                     else:
                         print(f"warning: value '{v}' for manual field '{k}' is not allowed. Using default '{field_cfg.default}'", file=sys.stderr)
                         manual_fields[k] = field_cfg.default
-                        
-            components[matched_key] = {
-                "status": status,
-                "manual_status": status,
-                "manual_fields": manual_fields,
-                "violations": filtered_violations
-            }
-            if ast_hash:
-                components[matched_key]["ast_hash"] = ast_hash
-            
-        self._save_db_json(db_data)
+
+            self._upsert_component(matched_key, status, status, manual_fields, ast_hash)
+            self._set_violations(matched_key, filtered_violations)
+
+        self.conn.commit()
 
     def update_violations_and_statuses(self, violations: List[Any], ontology, root: Path, G: Optional[Any] = None) -> List[Dict[str, Any]]:
         import sys
         from utils import resolve_relative_path
-        
+
         violations_by_file = {}
         for v in violations:
             rel_path = resolve_relative_path(v.filepath, root)
             violations_by_file.setdefault(rel_path, []).append(v)
-            
+
         all_files = set()
         if G is not None:
             for node_id in G.nodes:
@@ -252,26 +210,20 @@ class Database:
                 all_files = {resolve_relative_path(row["filepath"], root) for row in cursor.fetchall()}
             except Exception:
                 pass
-        
-        db_data = self._load_db_json()
-        components = db_data.setdefault("components", {})
-        
-        # Include any existing files in db.json and current violations
-        all_files.update(components.keys())
+
+        existing_files = {row['filepath'] for row in self.conn.execute("SELECT filepath FROM components").fetchall()}
+        all_files.update(existing_files)
         all_files.update(violations_by_file.keys())
-        
+
         all_aggregated_violations = []
-        
+
         for filepath in all_files:
-            # Skip empty or non-existent file path keys
             if not filepath:
                 continue
-            comp = components.get(filepath)
+            comp = self.get_component(filepath)
             if comp:
                 manual_status = comp.get("manual_status")
                 manual_fields = comp.get("manual_fields") or {}
-                # Ensure manual fields are populated (even if empty)
-                # Keep ast_hash if present
                 ast_hash = comp.get("ast_hash")
                 aggregated = [v for v in comp.get("violations", []) if v.get("origin") == "manual"]
             else:
@@ -279,7 +231,7 @@ class Database:
                 manual_fields = {}
                 ast_hash = None
                 aggregated = []
-                
+
             file_violations = violations_by_file.get(filepath, [])
             for v in file_violations:
                 aggregated.append({
@@ -290,29 +242,23 @@ class Database:
                     "target_node": v.target_id,
                     "filepath": filepath
                 })
-                
+
             if manual_status:
                 status = manual_status
             elif aggregated:
                 status = "VIOLATION_DETECTED"
             else:
                 status = "COMPLIANT"
-                
-            components[filepath] = {
-                "status": status,
-                "manual_status": manual_status,
-                "manual_fields": manual_fields,
-                "violations": aggregated
-            }
-            if ast_hash:
-                components[filepath]["ast_hash"] = ast_hash
+
+            self._upsert_component(filepath, status, manual_status, manual_fields, ast_hash)
+            self._set_violations(filepath, aggregated)
             all_aggregated_violations.extend(aggregated)
-            
-        self._save_db_json(db_data)
+
+        self.conn.commit()
         return all_aggregated_violations
 
     def _create_tables(self):
-        """Initializes the relational schema and indices[cite: 3]."""
+        """Initializes the relational schema and indices."""
         cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS nodes (
@@ -340,12 +286,35 @@ class Database:
                 FOREIGN KEY(target_id) REFERENCES nodes(id) ON DELETE CASCADE
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS components (
+                filepath TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'PENDING_AUDIT',
+                manual_status TEXT,
+                manual_fields TEXT NOT NULL DEFAULT '{}',
+                ast_hash TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS component_violations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filepath TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                rule TEXT,
+                message TEXT,
+                source_node TEXT,
+                target_node TEXT,
+                FOREIGN KEY(filepath) REFERENCES components(filepath) ON DELETE CASCADE
+            )
+        """)
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes (filepath)")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_edges_src ON edges (source_id)")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_edges_tgt ON edges (target_id)")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cv_filepath ON component_violations (filepath)")
         self.conn.commit()
 
     def sync_nodes(self, filepath: str, parsed_nodes: List[CodeNode], ontology: Optional[OntologyConfig] = None):

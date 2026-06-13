@@ -19,6 +19,7 @@ class TestDatabase(unittest.TestCase):
         self.db = Database(str(self.db_path))
 
     def tearDown(self):
+        self.db.close()
         shutil.rmtree(self.temp_dir)
 
     def test_database_creation(self):
