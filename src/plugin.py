@@ -103,6 +103,136 @@ class ArchPlugin(PluginHookInterface):
                 
             data["weight"] = weight
 
+    @staticmethod
+    def _matches_prefix(target_str: str, prefix: str) -> bool:
+        if target_str.startswith(prefix):
+            return True
+        if target_str.startswith("package:") and prefix.startswith("lib/"):
+            parts = target_str.split("/", 1)
+            if len(parts) > 1:
+                target_pkg_rel = parts[1]
+                prefix_rel = prefix[4:]
+                if target_pkg_rel.startswith(prefix_rel):
+                    return True
+        return False
+
+    def _assign_metadata(self, G, ontology, root: Path, db=None, modified_files=None):
+        if modified_files is None:
+            modified_files = set()
+
+        outgoing_imports = {}
+        outgoing_calls = {}
+        edges_fn = G.out_edges if hasattr(G, "out_edges") else G.edges
+        for u in G.nodes:
+            outgoing_imports[u] = []
+            outgoing_calls[u] = []
+            for _, v, edge_data in edges_fn(u, data=True):
+                rel = edge_data.get("type") or edge_data.get("relation") or ""
+                rel_lower = rel.lower()
+                if "import" in rel_lower:
+                    outgoing_imports[u].append(v)
+                elif "call" in rel_lower or "use" in rel_lower or "reference" in rel_lower:
+                    outgoing_calls[u].append(v)
+
+        for node_id in G.nodes:
+            data = G.nodes[node_id]
+            source_file = data.get("source_file") or ""
+            node_label = data.get("label") or ""
+            
+            rel_source_file = resolve_relative_path(source_file, root)
+            
+            hash_changed = rel_source_file in modified_files
+
+            comp_info = db.get_component(rel_source_file) if db else None
+
+            manual_cfg = ontology.get_manual_fields_for_file(rel_source_file)
+            for field_name, field_config in manual_cfg.items():
+                val = comp_info.get("manual_fields", {}).get(field_name) if comp_info else None
+                if val is None:
+                    val = field_config.default
+                    
+                if field_config.values is not None and val not in field_config.values:
+                    print(f"warning: value '{val}' for manual field '{field_name}' in '{rel_source_file}' is no longer allowed. Resetting to default '{field_config.default}' and marking for audit.", file=sys.stderr)
+                    val = field_config.default
+                    data["arch_meta_requires_audit"] = True
+                    
+                data[f"arch_meta_{field_name}"] = val
+
+            automatic_cfg = ontology.get_automatic_fields_for_file(rel_source_file)
+            for field_name, field_config in automatic_cfg.items():
+                prev_node = db.get_node(node_id) if db else None
+                prev_val = prev_node.semantics.fields.get(field_name) if prev_node else None
+                
+                if prev_val is not None and field_config.values is not None and prev_val not in field_config.values:
+                    print(f"warning: value '{prev_val}' for automatic field '{field_name}' in '{rel_source_file}' is no longer allowed. Resetting to default '{field_config.default}' and marking for audit.", file=sys.stderr)
+                    data[f"arch_meta_{field_name}"] = field_config.default
+                    data["arch_meta_requires_audit"] = True
+                    continue
+
+                assigned_value = field_config.default
+                matched = False
+                for rule in field_config.assignment_rules:
+                    conds = rule.conditions
+                    match = True
+                    
+                    if conds.path_prefix is not None:
+                        prefix = conds.path_prefix
+                        if not (rel_source_file == prefix or rel_source_file.startswith(prefix + "/")):
+                            match = False
+                    
+                    if conds.file_name is not None:
+                        if Path(rel_source_file).name != conds.file_name:
+                            match = False
+                    
+                    if conds.class_suffix is not None:
+                        if not node_label.endswith(conds.class_suffix):
+                            match = False
+                            
+                    if conds.class_contains is not None:
+                        if conds.class_contains not in node_label:
+                            match = False
+                            
+                    if conds.name_contains is not None:
+                        if conds.name_contains not in node_label:
+                            match = False
+                            
+                    if conds.imports_prefix is not None:
+                        imports = outgoing_imports.get(node_id, [])
+                        if not any(self._matches_prefix(imp, conds.imports_prefix) or self._matches_prefix(G.nodes[imp].get("label") or "", conds.imports_prefix) for imp in imports):
+                            match = False
+                            
+                    if conds.calls_prefix is not None:
+                        calls = outgoing_calls.get(node_id, [])
+                        if not any(self._matches_prefix(call, conds.calls_prefix) or self._matches_prefix(G.nodes[call].get("label") or "", conds.calls_prefix) for call in calls):
+                            match = False
+                            
+                    if match:
+                        assigned_value = rule.value
+                        matched = True
+                        break
+                        
+                if hash_changed and field_config.reset_on_change:
+                    if not field_config.assignment_rules or not matched:
+                        assigned_value = field_config.default
+                        data["arch_meta_requires_audit"] = True
+                        
+                data[f"arch_meta_{field_name}"] = assigned_value
+
+            if comp_info:
+                manual_status = comp_info.get("manual_status")
+                if manual_status is not None:
+                    data["arch_meta_manual_status"] = manual_status
+                
+                manual_v_msgs = [v["message"] for v in comp_info.get("violations", []) if v.get("origin") == "manual"]
+                if manual_v_msgs:
+                    data["arch_meta_manual_violations"] = " | ".join(manual_v_msgs)
+
+        G = propagate_metadata(G, ontology, root)
+        self._assign_edge_weights(G, ontology, root)
+        if db:
+            db.sync_graph_metadata(G, root)
+        return G
+
     def on_post_build(self, G, extraction: dict, root):
         root = Path(root)
         try:
@@ -111,13 +241,11 @@ class ArchPlugin(PluginHookInterface):
             return G
 
         try:
-            # Resolve Database path and load
             try:
                 db = Database(str(self.db_path))
             except Exception:
                 db = None
 
-            # Load Graphify's manifest.json to detect AST changes
             manifest_path = root / "graphify-out" / "manifest.json"
             manifest_data = {}
             if manifest_path.exists():
@@ -129,7 +257,6 @@ class ArchPlugin(PluginHookInterface):
             modified_files = set()
             if db:
                 try:
-                    # Find all unique source files in the graph
                     graph_files = set()
                     for node_id in G.nodes:
                         sf = G.nodes[node_id].get("source_file")
@@ -175,139 +302,7 @@ class ArchPlugin(PluginHookInterface):
                 except Exception as e:
                     print(f"warning: failed to sync file-level changes: {e}", file=sys.stderr)
 
-            # Helper to check prefix matching including package: imports/calls
-            def matches_prefix(target_str: str, prefix: str) -> bool:
-                if target_str.startswith(prefix):
-                    return True
-                if target_str.startswith("package:") and prefix.startswith("lib/"):
-                    parts = target_str.split("/", 1)
-                    if len(parts) > 1:
-                        target_pkg_rel = parts[1]
-                        prefix_rel = prefix[4:]
-                        if target_pkg_rel.startswith(prefix_rel):
-                            return True
-                return False
-
-            outgoing_imports = {}
-            outgoing_calls = {}
-            edges_fn = G.out_edges if hasattr(G, "out_edges") else G.edges
-            for u in G.nodes:
-                outgoing_imports[u] = []
-                outgoing_calls[u] = []
-                for _, v, edge_data in edges_fn(u, data=True):
-                    rel = edge_data.get("type") or edge_data.get("relation") or ""
-                    rel_lower = rel.lower()
-                    if "import" in rel_lower:
-                        outgoing_imports[u].append(v)
-                    elif "call" in rel_lower or "use" in rel_lower or "reference" in rel_lower:
-                        outgoing_calls[u].append(v)
-
-            for node_id in G.nodes:
-                data = G.nodes[node_id]
-                source_file = data.get("source_file") or ""
-                node_label = data.get("label") or ""
-                
-                # Normalize source_file to relative posix path for matching
-                rel_source_file = resolve_relative_path(source_file, root)
-                
-                hash_changed = rel_source_file in modified_files
-
-                comp_info = db.get_component(rel_source_file) if db else None
-
-                # 1. Process manual_fields (User-guided overrides or defaults)
-                manual_cfg = ontology.get_manual_fields_for_file(rel_source_file)
-                for field_name, field_config in manual_cfg.items():
-                    val = comp_info.get("manual_fields", {}).get(field_name) if comp_info else None
-                    if val is None:
-                        val = field_config.default
-                        
-                    # Check schema drift from manual overrides
-                    if field_config.values is not None and val not in field_config.values:
-                        print(f"warning: value '{val}' for manual field '{field_name}' in '{rel_source_file}' is no longer allowed. Resetting to default '{field_config.default}' and marking for audit.", file=sys.stderr)
-                        val = field_config.default
-                        data["arch_meta_requires_audit"] = True
-                        
-                    data[f"arch_meta_{field_name}"] = val
-
-                # 2. Process automatic_fields (Rule-injected metadata fields)
-                automatic_cfg = ontology.get_automatic_fields_for_file(rel_source_file)
-                for field_name, field_config in automatic_cfg.items():
-                    # Check schema drift from previous AST database node value
-                    prev_node = db.get_node(node_id) if db else None
-                    prev_val = prev_node.semantics.fields.get(field_name) if prev_node else None
-                    
-                    if prev_val is not None and field_config.values is not None and prev_val not in field_config.values:
-                        print(f"warning: value '{prev_val}' for automatic field '{field_name}' in '{rel_source_file}' is no longer allowed. Resetting to default '{field_config.default}' and marking for audit.", file=sys.stderr)
-                        data[f"arch_meta_{field_name}"] = field_config.default
-                        data["arch_meta_requires_audit"] = True
-                        continue
-
-                    # Strict assignment rules
-                    assigned_value = field_config.default
-                    matched = False
-                    for rule in field_config.assignment_rules:
-                        conds = rule.conditions
-                        match = True
-                        
-                        if conds.path_prefix is not None:
-                            prefix = conds.path_prefix
-                            if not (rel_source_file == prefix or rel_source_file.startswith(prefix + "/")):
-                                match = False
-                        
-                        if conds.file_name is not None:
-                            if Path(rel_source_file).name != conds.file_name:
-                                match = False
-                        
-                        if conds.class_suffix is not None:
-                            if not node_label.endswith(conds.class_suffix):
-                                match = False
-                                
-                        if conds.class_contains is not None:
-                            if conds.class_contains not in node_label:
-                                match = False
-                                
-                        if conds.name_contains is not None:
-                            if conds.name_contains not in node_label:
-                                match = False
-                                
-                        if conds.imports_prefix is not None:
-                            imports = outgoing_imports.get(node_id, [])
-                            if not any(matches_prefix(imp, conds.imports_prefix) or matches_prefix(G.nodes[imp].get("label") or "", conds.imports_prefix) for imp in imports):
-                                match = False
-                                
-                        if conds.calls_prefix is not None:
-                            calls = outgoing_calls.get(node_id, [])
-                            if not any(matches_prefix(call, conds.calls_prefix) or matches_prefix(G.nodes[call].get("label") or "", conds.calls_prefix) for call in calls):
-                                match = False
-                                
-                        if match:
-                            assigned_value = rule.value
-                            matched = True
-                            break
-                            
-                    # Handle reset on hash change
-                    if hash_changed and field_config.reset_on_change:
-                        if not field_config.assignment_rules or not matched:
-                            assigned_value = field_config.default
-                            data["arch_meta_requires_audit"] = True
-                            
-                    data[f"arch_meta_{field_name}"] = assigned_value
-
-                # Preserve manual_status and manual_violations from DB
-                if comp_info:
-                    manual_status = comp_info.get("manual_status")
-                    if manual_status is not None:
-                        data["arch_meta_manual_status"] = manual_status
-                    
-                    manual_v_msgs = [v["message"] for v in comp_info.get("violations", []) if v.get("origin") == "manual"]
-                    if manual_v_msgs:
-                        data["arch_meta_manual_violations"] = " | ".join(manual_v_msgs)
-
-            G = propagate_metadata(G, ontology, root)
-            self._assign_edge_weights(G, ontology, root)
-            if db:
-                db.sync_graph_metadata(G, root)
-            return G
+            return self._assign_metadata(G, ontology, root, db=db, modified_files=modified_files)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -427,4 +422,14 @@ class ArchPlugin(PluginHookInterface):
 
     def on_report(self, report_text: str, G, communities: dict, root) -> str:
         root = Path(root)
+        has_arch_meta = any(
+            any(k.startswith("arch_meta_") for k in d)
+            for _, d in G.nodes(data=True)
+        )
+        if not has_arch_meta:
+            try:
+                ontology = self.load_ontology(root)
+                self._assign_metadata(G, ontology, root)
+            except Exception:
+                pass
         return PluginReportGenerator.generate_report(report_text, G, communities, root, self)

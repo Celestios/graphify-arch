@@ -584,6 +584,38 @@ class Database:
         """, (semantics_json, node.ai_summary, embedding_bytes, node_id))
         self.conn.commit()
 
+    def sync_graph_metadata(self, G, root: Path):
+        """Write arch_meta_* from graph nodes back to nodes.semantics in DB."""
+        from utils import resolve_relative_path
+        cursor = self.conn.cursor()
+        field_map = {
+            "arch_meta_layer": "layer",
+            "arch_meta_tier": "tier",
+            "arch_meta_purity": "purity",
+            "arch_meta_architectural_role": "architectural_role",
+            "arch_meta_pattern": "pattern",
+        }
+        for node_id, data in G.nodes(data=True):
+            node = self.get_node(node_id)
+            if not node:
+                continue
+            changed = False
+            for graph_key, sem_key in field_map.items():
+                val = data.get(graph_key)
+                if val is not None and val != "Unknown":
+                    node.semantics.fields[sem_key] = val
+                    changed = True
+            summary = data.get("arch_meta_ai_summary")
+            if summary:
+                node.ai_summary = summary
+                changed = True
+            if changed:
+                semantics_json = json.dumps(asdict(node.semantics))
+                cursor.execute(
+                    "UPDATE nodes SET semantics = ?, ai_summary = ? WHERE id = ?",
+                    (semantics_json, node.ai_summary, node_id))
+        self.conn.commit()
+
 
 class GraphBuilder:
     @staticmethod

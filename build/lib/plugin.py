@@ -16,7 +16,8 @@ from plugin_helpers import PluginCLIHandler, PluginEmbeddingsManager, PluginRepo
 class ArchPlugin(PluginHookInterface):
     name = "arch"
 
-    def should_activate(self, root: Path) -> bool:
+    def should_activate(self, root) -> bool:
+        root = Path(root)
         from project import ConfigLoader
         try:
             self.config_path, self.db_path = ConfigLoader.find_config(root)
@@ -34,10 +35,16 @@ class ArchPlugin(PluginHookInterface):
             if not args[1:]:
                 PluginCLIHandler.print_arch_help()
                 sys.exit(0)
+            if args[1] == "install":
+                PluginCLIHandler.handle_arch_cli(Path.cwd(), args[1:], self)
+                sys.exit(0)
             if not self.config_path.exists():
                 print("warning: graphify-out/arch/config.json not found. The AI agent should create it, or write an ontology config manually.", file=sys.stderr)
                 sys.exit(1)
             PluginCLIHandler.handle_arch_cli(Path.cwd(), args[1:], self)
+            sys.exit(0)
+        elif cmd == "install":
+            PluginCLIHandler.handle_arch_cli(Path.cwd(), ["install"], self)
             sys.exit(0)
         elif cmd == "query" and "--semantic" in args:
             PluginCLIHandler.handle_semantic_query(Path.cwd(), args[1:])
@@ -96,7 +103,8 @@ class ArchPlugin(PluginHookInterface):
                 
             data["weight"] = weight
 
-    def on_post_build(self, G, extraction: dict, root: Path):
+    def on_post_build(self, G, extraction: dict, root):
+        root = Path(root)
         try:
             ontology = self.load_ontology(root)
         except Exception:
@@ -242,7 +250,12 @@ class ArchPlugin(PluginHookInterface):
                         match = True
                         
                         if conds.path_prefix is not None:
-                            if not rel_source_file.startswith(conds.path_prefix):
+                            prefix = conds.path_prefix
+                            if not (rel_source_file == prefix or rel_source_file.startswith(prefix + "/")):
+                                match = False
+                        
+                        if conds.file_name is not None:
+                            if Path(rel_source_file).name != conds.file_name:
                                 match = False
                         
                         if conds.class_suffix is not None:
@@ -292,13 +305,16 @@ class ArchPlugin(PluginHookInterface):
 
             G = propagate_metadata(G, ontology, root)
             self._assign_edge_weights(G, ontology, root)
+            if db:
+                db.sync_graph_metadata(G, root)
             return G
         except Exception as e:
             import traceback
             traceback.print_exc()
             raise e
 
-    def on_post_analyze(self, G, communities: dict, analysis: dict, root: Path) -> dict:
+    def on_post_analyze(self, G, communities: dict, analysis: dict, root) -> dict:
+        root = Path(root)
         try:
             ontology = self.load_ontology(root)
         except Exception:
@@ -309,6 +325,7 @@ class ArchPlugin(PluginHookInterface):
         try:
             db = Database(str(self.db_path))
             all_violations = db.update_violations_and_statuses(violations, ontology, root, G)
+            db.sync_graph_metadata(G, root)
             
             components = db.get_all_components()
             
@@ -408,5 +425,6 @@ class ArchPlugin(PluginHookInterface):
             
         return analysis
 
-    def on_report(self, report_text: str, G, communities: dict, root: str) -> str:
+    def on_report(self, report_text: str, G, communities: dict, root) -> str:
+        root = Path(root)
         return PluginReportGenerator.generate_report(report_text, G, communities, root, self)

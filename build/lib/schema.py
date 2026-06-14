@@ -62,6 +62,7 @@ class SemanticFacets:
 
 @dataclass
 class AssignmentCondition:
+    file_name: Optional[str] = None
     path_prefix: Optional[str] = None
     class_suffix: Optional[str] = None
     class_contains: Optional[str] = None

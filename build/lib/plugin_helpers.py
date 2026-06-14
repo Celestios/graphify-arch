@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import hashlib
+import shutil
 import subprocess
 import numpy as np
 from pathlib import Path
@@ -19,11 +20,15 @@ class PluginCLIHandler:
 Architecture enforcement commands:
 
   audit                                   Check all files for architectural violations
-  audit --rule <type>                     Check for a specific violation type
   set-status <file> <status> [msg]        Override compliance status for a file
-  set-status-bulk <json-file>             Bulk-set manual status overrides
+  update-component <json-file>            Update component metadata from a JSON file
   analyze                                 Validate ontology config syntax and consistency
+  discover-ontology                       Print current ontology config
+  query-file --path <file>                Query nodes for a specific file
+  compile-context --target <id>           Compile subgraph context for LLM input
+  semantic-search --query <text>          Vector similarity search over code
   setup-embeddings                        Download ONNX embedding model for semantic search
+  install                                 Install arch skill section and reference files
 
 Status values:
   COMPLIANT           File passes all architectural rules
@@ -32,7 +37,7 @@ Status values:
 
 Config:
   Define rules in graphify-out/arch/config.json
-  See references/config.md for the full schema""")
+  See references/arch-config.md for the full schema""")
 
     @staticmethod
     def handle_arch_cli(root: Path, args: list[str], plugin_instance):
@@ -44,18 +49,36 @@ Config:
         
         subparsers.add_parser("setup-embeddings", help="Download ONNX embedding model")
         subparsers.add_parser("analyze", help="Analyze configuration completeness and sanity")
+        subparsers.add_parser("discover-ontology", help="Print current ontology config")
         
         set_status_parser = subparsers.add_parser("set-status", help="Set manual compliance status for a component")
         set_status_parser.add_argument("file_path", help="Relative file path to the component")
         set_status_parser.add_argument("status", choices=["COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"], help="Compliance status")
         set_status_parser.add_argument("violations", nargs="?", default="", help="Description of violations")
         
-        set_status_bulk_parser = subparsers.add_parser("set-status-bulk", help="Set manual compliance status for multiple components via a JSON file")
-        set_status_bulk_parser.add_argument("json_file", help="Path to the JSON file containing status changes")
+        update_component_parser = subparsers.add_parser("update-component", help="Update component metadata from a JSON file (status, fields, etc.)")
+        update_component_parser.add_argument("json_file", help="Path to the JSON file containing component updates")
 
-        update_bulk_parser = subparsers.add_parser("update-bulk", help="Set manual compliance status for multiple components via a JSON file (alias of set-status-bulk)")
-        update_bulk_parser.add_argument("json_file", help="Path to the JSON file containing status changes")
-        
+        query_file_parser = subparsers.add_parser("query-file", help="Query nodes for a specific file")
+        query_file_parser.add_argument("--path", required=True, help="Target file path")
+        query_file_parser.add_argument("--methods", action="store_true", help="Filter to methods only")
+        query_file_parser.add_argument("--classes", action="store_true", help="Filter to classes/structs only")
+        query_file_parser.add_argument("--functions", action="store_true", help="Filter to functions only")
+        query_file_parser.add_argument("--include-body", action="store_true", help="Include raw code body")
+
+        compile_parser = subparsers.add_parser("compile-context", help="Compile subgraph context for LLM input")
+        compile_parser.add_argument("--target", required=True, help="Focal node identifier")
+        compile_parser.add_argument("--direction", required=True, choices=["upstream", "downstream", "symmetric"])
+        compile_parser.add_argument("--resolution", required=True, choices=["full", "signature"])
+        compile_parser.add_argument("--radius", default=1, type=int, help="Traversal hops (default: 1)")
+        compile_parser.add_argument("--out", required=True, help="Output file path")
+
+        search_parser = subparsers.add_parser("semantic-search", help="Vector similarity search over code")
+        search_parser.add_argument("--query", required=True, help="Natural language query")
+        search_parser.add_argument("--limit", default=5, type=int, help="Max results (default: 5)")
+
+        subparsers.add_parser("install", help="Install arch skill section and reference files to AI assistant configs")
+
         parsed_args = parser.parse_args(args)
         
         if parsed_args.arch_command == "set-status":
@@ -100,73 +123,6 @@ Config:
             print(f"Set manual status for '{file_path}' to {status}")
             sys.exit(0)
             
-        elif parsed_args.arch_command in ["set-status-bulk", "update-bulk"]:
-            json_file_path = Path(parsed_args.json_file).resolve()
-            if not json_file_path.exists():
-                print(f"error: JSON file not found at {json_file_path}", file=sys.stderr)
-                sys.exit(1)
-                
-            try:
-                bulk_data = json.loads(json_file_path.read_text(encoding="utf-8"))
-            except Exception as e:
-                print(f"error: failed to load JSON file: {e}", file=sys.stderr)
-                sys.exit(1)
-                
-            if not isinstance(bulk_data, dict):
-                print("error: bulk update JSON must be a dictionary object", file=sys.stderr)
-                sys.exit(1)
-                
-            from project import ConfigLoader
-            from db import Database
-            try:
-                config_path, db_path = ConfigLoader.find_config(root)
-                db = Database(str(db_path))
-                ontology = plugin_instance.load_ontology(root)
-            except Exception as e:
-                print(f"error: failed to initialize bulk update: {e}", file=sys.stderr)
-                sys.exit(1)
-                
-            db.set_component_status_bulk(bulk_data, ontology, root)
-            
-            # Load and update graph.json
-            graph_path = root / "graphify-out" / "graph.json"
-            if graph_path.exists():
-                try:
-                    graph_data = json.loads(graph_path.read_text(encoding="utf-8"))
-                    nodes = graph_data.get("nodes", [])
-                    modified = False
-                    for node in nodes:
-                        sf = node.get("source_file") or ""
-                        if sf:
-                            try:
-                                rel_sf = Path(sf).relative_to(root).as_posix()
-                            except ValueError:
-                                rel_sf = Path(sf).as_posix()
-                                
-                            for raw_key, entry_data in bulk_data.items():
-                                from utils import resolve_relative_path
-                                rel_key = resolve_relative_path(raw_key, root)
-                                if rel_sf == rel_key or rel_sf.endswith(rel_key) or rel_key.endswith(rel_sf):
-                                    status = (entry_data.get("status") or "").upper()
-                                    if status not in ["COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"]:
-                                        continue
-                                    violations_raw = entry_data.get("violations", "")
-                                    if isinstance(violations_raw, list):
-                                        violations_msg = " | ".join(str(v) for v in violations_raw)
-                                    else:
-                                        violations_msg = str(violations_raw) if violations_raw is not None else ""
-                                    
-                                    node["arch_meta_manual_status"] = status
-                                    node["arch_meta_manual_violations"] = violations_msg
-                                    modified = True
-                    if modified:
-                        graph_path.write_text(json.dumps(graph_data, ensure_ascii=False), encoding="utf-8")
-                except Exception as e:
-                    print(f"warning: failed to update graph.json: {e}", file=sys.stderr)
-                    
-            print(f"Successfully bulk-updated {len(bulk_data)} status overrides.")
-            sys.exit(0)
-            
         elif parsed_args.arch_command == "audit":
             gp = root / "graphify-out" / "graph.json"
             if not gp.exists():
@@ -180,9 +136,14 @@ Config:
             if "links" not in _raw and "edges" in _raw:
                 _raw = dict(_raw, links=_raw["edges"])
             try:
-                G = json_graph.node_link_graph(_raw, edges="links")
+                G = json_graph.node_link_graph(_raw, directed=True, edges="links")
             except TypeError:
-                G = json_graph.node_link_graph(_raw)
+                G = json_graph.node_link_graph(_raw, directed=True)
+            
+            # Run metadata annotation before auditing
+            from plugins import discover_plugins, run_hook
+            plugins = discover_plugins(root)
+            G = run_hook(plugins, "on_post_build", G, {}, root)
                 
             ontology = plugin_instance.load_ontology(root)
             violations = audit_architecture_rules(G, ontology, root)
@@ -196,6 +157,7 @@ Config:
                 config_path, db_path = ConfigLoader.find_config(root)
                 db = Database(str(db_path))
                 db.update_violations_and_statuses(violations, ontology, root, G)
+                db.sync_graph_metadata(G, root)
                 
                 components = db.get_all_components()
                 for filepath, comp in sorted(components.items()):
@@ -311,6 +273,197 @@ Config:
                 sys.exit(1)
             else:
                 print("[OK] Referential integrity validation passed.")
+            sys.exit(0)
+
+        elif parsed_args.arch_command == "install":
+            from plugin_helpers import PluginReportGenerator
+            
+            # Write to all known environments
+            all_env_skill_dirs = [
+                Path.home() / ".gemini" / "config" / "skills" / "graphify",
+                Path.home() / ".gemini" / "skills" / "graphify",
+                Path.home() / ".claude" / "skills" / "graphify",
+                Path.home() / ".codex" / "skills" / "graphify",
+                Path.home() / ".config" / "opencode" / "skills" / "graphify",
+                Path.home() / ".config" / "kilo" / "skills" / "graphify",
+                Path.home() / ".config" / "devin" / "skills" / "graphify",
+                Path.home() / ".copilot" / "skills" / "graphify",
+                Path.home() / ".openclaw" / "skills" / "graphify",
+                Path.home() / ".factory" / "skills" / "graphify",
+                Path.home() / ".trae" / "skills" / "graphify",
+                Path.home() / ".kiro" / "skills" / "graphify",
+                Path.home() / ".pi" / "agent" / "skills" / "graphify",
+                Path.home() / ".codebuddy" / "skills" / "graphify",
+                Path.home() / ".agents" / "skills" / "graphify",
+                root / ".agents" / "skills" / "graphify",
+                root / ".gemini" / "skills" / "graphify",
+                root / ".devin" / "skills" / "graphify",
+                root / ".opencode" / "skills" / "graphify",
+                root / ".codex" / "skills" / "graphify",
+                root / ".cursor" / "skills" / "graphify",
+            ]
+            
+            installed_count = 0
+            for env_dir in all_env_skill_dirs:
+                if env_dir.exists():
+                    PluginReportGenerator.post_env_installation_hook(env_dir, root)
+                    installed_count += 1
+            
+            if installed_count == 0:
+                print("No graphify skill directories found. Install graphify first, then run 'graphify arch install'.")
+            else:
+                print(f"Installed arch skill section and reference files to {installed_count} environment(s).")
+            sys.exit(0)
+
+        elif parsed_args.arch_command == "discover-ontology":
+            from project import ConfigLoader
+            try:
+                config_path, db_path = ConfigLoader.find_config(root)
+                ontology = ConfigLoader.load(config_path).ontology
+            except Exception as e:
+                print(f"error: failed to load ontology: {e}", file=sys.stderr)
+                sys.exit(1)
+            import dataclasses
+            print(json.dumps(dataclasses.asdict(ontology), indent=2))
+            sys.exit(0)
+
+        elif parsed_args.arch_command == "update-component":
+            from project import ConfigLoader
+            from db import Database
+            try:
+                config_path, db_path = ConfigLoader.find_config(root)
+                db = Database(str(db_path))
+                ontology = ConfigLoader.load(config_path).ontology
+            except Exception as e:
+                print(f"error: failed to initialize: {e}", file=sys.stderr)
+                sys.exit(1)
+            
+            json_file_path = Path(parsed_args.json_file).resolve()
+            if not json_file_path.exists():
+                print(f"error: JSON file not found at {json_file_path}", file=sys.stderr)
+                sys.exit(1)
+            try:
+                payload = json.loads(json_file_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"error: failed to load JSON file: {e}", file=sys.stderr)
+                sys.exit(1)
+            
+            if not isinstance(payload, dict):
+                print("error: JSON must be an object with filepath keys", file=sys.stderr)
+                sys.exit(1)
+            
+            db.set_component_status_bulk(payload, ontology, root)
+            
+            graph_path = root / "graphify-out" / "graph.json"
+            if graph_path.exists():
+                try:
+                    graph_data = json.loads(graph_path.read_text(encoding="utf-8"))
+                    nodes = graph_data.get("nodes", [])
+                    modified = False
+                    for node in nodes:
+                        sf = node.get("source_file") or ""
+                        if sf:
+                            try:
+                                rel_sf = Path(sf).relative_to(root).as_posix()
+                            except ValueError:
+                                rel_sf = Path(sf).as_posix()
+                            for raw_key, entry_data in payload.items():
+                                from utils import resolve_relative_path as _rlp
+                                rel_key = _rlp(raw_key, root)
+                                if rel_sf == rel_key or rel_sf.endswith(rel_key) or rel_key.endswith(rel_sf):
+                                    status = (entry_data.get("status") or "").upper()
+                                    if status in ("COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"):
+                                        node["arch_meta_manual_status"] = status
+                                    violations_raw = entry_data.get("violations", "")
+                                    if isinstance(violations_raw, list):
+                                        violations_msg = " | ".join(str(v) for v in violations_raw)
+                                    else:
+                                        violations_msg = str(violations_raw) if violations_raw else ""
+                                    node["arch_meta_manual_violations"] = violations_msg
+                                    for field_name, field_val in entry_data.items():
+                                        if field_name not in ("status", "violations"):
+                                            node[f"arch_meta_{field_name}"] = field_val
+                                    modified = True
+                    if modified:
+                        graph_path.write_text(json.dumps(graph_data, ensure_ascii=False), encoding="utf-8")
+                except Exception as e:
+                    print(f"warning: failed to update graph.json: {e}", file=sys.stderr)
+            
+            print(f"Updated {len(payload)} component(s).")
+            sys.exit(0)
+
+        elif parsed_args.arch_command == "query-file":
+            from project import ConfigLoader
+            from db import Database
+            from schema import AstNodeType
+            try:
+                config_path, db_path = ConfigLoader.find_config(root)
+                db = Database(str(db_path))
+            except Exception as e:
+                print(f"error: failed to load database: {e}", file=sys.stderr)
+                sys.exit(1)
+            
+            nodes = db._get_all_nodes_internal().values()
+            results = []
+            for n in nodes:
+                if n.filepath != parsed_args.path:
+                    continue
+                match = False
+                if not (parsed_args.methods or parsed_args.classes or parsed_args.functions):
+                    match = True
+                else:
+                    if parsed_args.methods and n.node_type == AstNodeType.METHOD:
+                        match = True
+                    if parsed_args.functions and n.node_type == AstNodeType.FUNCTION:
+                        match = True
+                    if parsed_args.classes and n.node_type in (AstNodeType.STRUCT, AstNodeType.CLASS):
+                        match = True
+                if match:
+                    result = {
+                        "id": n.id,
+                        "filepath": n.filepath,
+                        "node_type": n.node_type.value,
+                        "raw_code": n.raw_code if parsed_args.include_body else None
+                    }
+                    sem = n.semantics
+                    for field_name in ("layer", "tier", "purity", "architectural_role", "pattern"):
+                        result[field_name] = sem.fields.get(field_name, "Unknown")
+                    results.append(result)
+            print(json.dumps(results, indent=2))
+            sys.exit(0)
+
+        elif parsed_args.arch_command == "compile-context":
+            from project import ConfigLoader
+            from db import Database
+            from compiler import ContextCompiler
+            try:
+                config_path, db_path = ConfigLoader.find_config(root)
+                db = Database(str(db_path))
+                ontology = ConfigLoader.load(config_path).ontology
+            except Exception as e:
+                print(f"error: failed to initialize: {e}", file=sys.stderr)
+                sys.exit(1)
+            
+            nodes = db.get_subgraph(parsed_args.target, parsed_args.radius, parsed_args.direction)
+            ContextCompiler.compile(parsed_args.target, nodes, parsed_args.resolution, parsed_args.direction, parsed_args.radius, parsed_args.out, ontology)
+            print(f"Compiled context to {parsed_args.out}")
+            sys.exit(0)
+
+        elif parsed_args.arch_command == "semantic-search":
+            from project import ConfigLoader
+            from db import Database
+            from embedder import LocalEmbedder
+            try:
+                config_path, db_path = ConfigLoader.find_config(root)
+                db = Database(str(db_path))
+            except Exception as e:
+                print(f"error: failed to load database: {e}", file=sys.stderr)
+                sys.exit(1)
+            
+            embedder = LocalEmbedder()
+            query_emb = embedder.embed(parsed_args.query)
+            res = db.semantic_vector_search(query_emb, parsed_args.limit)
+            print(json.dumps(res, indent=2))
             sys.exit(0)
 
     @staticmethod
@@ -494,6 +647,49 @@ class PluginEmbeddingsManager:
 
 class PluginReportGenerator:
     @staticmethod
+    def _copy_arch_references_to_skill_dir(skill_dir: Path) -> None:
+        """Copy arch reference files to a skill directory's references/ folder.
+        
+        This mirrors graphify's behavior of writing reference files locally
+        instead of referencing GitHub URLs.
+        """
+        import sys
+        refs_src = Path(__file__).parent / "references"
+        if not refs_src.exists():
+            try:
+                refs_src = Path(__file__).resolve().parent / "references"
+            except Exception:
+                pass
+        if not refs_src.exists():
+            try:
+                import plugin_helpers
+                refs_src = Path(plugin_helpers.__file__).parent / "references"
+            except Exception:
+                pass
+        if not refs_src.exists():
+            try:
+                refs_src = Path(__file__).resolve().parent.parent / "references"
+            except Exception:
+                pass
+        if not refs_src.exists():
+            print(f"warning: arch references source not found at {refs_src}", file=sys.stderr)
+            return
+            
+        refs_dst = skill_dir / "references"
+        refs_dst.mkdir(parents=True, exist_ok=True)
+        
+        copied = 0
+        for ref_file in refs_src.glob("*.md"):
+            dst_file = refs_dst / ref_file.name
+            try:
+                shutil.copy2(ref_file, dst_file)
+                copied += 1
+            except Exception as e:
+                print(f"warning: failed to copy reference {ref_file.name} to {refs_dst}: {e}", file=sys.stderr)
+        if copied > 0:
+            print(f"  arch references   ->  {refs_dst} ({copied} files)")
+
+    @staticmethod
     def write_always_on_prompts(root_path: Path, G, violations: list, ontology):
         # Update Rule Files (Intercept existing, append if not found)
         rule_files = [
@@ -541,7 +737,7 @@ class PluginReportGenerator:
                 target_rules = [
                     "- Respect the architectural boundaries defined in `graphify-out/arch/config.json` when proposing or making code changes.",
                     "- Before proposing changes, run `graphify arch audit` to check for existing violations.",
-                    "- After making code changes, run `graphify arch reindex` then `graphify arch audit` to verify compliance.",
+                    "- After making code changes, run `graphify arch audit` to verify compliance.",
                     "- Use `graphify arch compile-context --target <node_id>` to understand the impact of changes on dependent code.",
                 ]
                 target_rules_text = "\n".join(target_rules)
@@ -580,10 +776,25 @@ class PluginReportGenerator:
         skill_files = [
             Path.home() / ".gemini" / "config" / "skills" / "graphify" / "SKILL.md",
             Path.home() / ".gemini" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".claude" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".codex" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".config" / "opencode" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".config" / "kilo" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".config" / "devin" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".copilot" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".openclaw" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".factory" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".trae" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".kiro" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".pi" / "agent" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".codebuddy" / "skills" / "graphify" / "SKILL.md",
+            Path.home() / ".agents" / "skills" / "graphify" / "SKILL.md",
             root_path / ".agents" / "skills" / "graphify" / "SKILL.md",
             root_path / ".gemini" / "skills" / "graphify" / "SKILL.md",
             root_path / ".devin" / "skills" / "graphify" / "SKILL.md",
             root_path / ".opencode" / "skills" / "graphify" / "SKILL.md",
+            root_path / ".codex" / "skills" / "graphify" / "SKILL.md",
+            root_path / ".cursor" / "skills" / "graphify" / "SKILL.md",
         ]
         
         skill_section = """
@@ -602,7 +813,11 @@ Enforce architectural rules on a codebase. The AI agent defines layers, tiers, a
 | `graphify arch` | Show help and available commands |
 | `graphify arch audit` | Check all files for architectural violations |
 | `graphify arch set-status <file> <status> [msg]` | Override compliance status for a file |
-| `graphify arch set-status-bulk <json-file>` | Bulk-set manual status overrides |
+| `graphify arch update-component <json-file>` | Update component metadata from JSON |
+| `graphify arch discover-ontology` | Print current ontology config |
+| `graphify arch query-file --path <file>` | Query nodes for a specific file |
+| `graphify arch compile-context --target <id>` | Compile subgraph context for LLM input |
+| `graphify arch semantic-search --query <text>` | Vector similarity search over code |
 | `graphify arch analyze` | Validate config syntax and consistency |
 | `graphify arch setup-embeddings` | Download ONNX embedding model |
 
@@ -616,14 +831,12 @@ Enforce architectural rules on a codebase. The AI agent defines layers, tiers, a
 
 ### References
 
-- `references/config.md` — full config schema, field types, assignment rules, handlers, examples
-- `references/commands.md` — all CLI commands with arguments and output format
-- `references/audit.md` — interpreting violations and fixing them
-- `references/context.md` — compiling subgraph context for LLM input
+Full documentation is available in the `references/` folder alongside this skill file:
+- `arch-config.md` — full config schema, field types, assignment rules, handlers, examples
+- `arch-commands.md` — all CLI commands with arguments and output format
+- `arch-audit.md` — interpreting violations and fixing them
+- `arch-context.md` — compiling subgraph context for LLM input
 """
-        # Source directory for reference files
-        src_refs_dir = Path(__file__).parent / "references"
-        
         for sf in skill_files:
             if not sf.exists():
                 continue
@@ -634,17 +847,110 @@ Enforce architectural rules on a codebase. The AI agent defines layers, tiers, a
                     new_content = content.rstrip() + "\n\n" + skill_section.strip() + "\n"
                     sf.write_text(new_content, encoding="utf-8")
                 
-                # Copy reference files
-                if src_refs_dir.exists():
-                    skill_dir = sf.parent
-                    refs_dir = skill_dir / "references"
-                    refs_dir.mkdir(parents=True, exist_ok=True)
-                    for ref_file in src_refs_dir.glob("*.md"):
-                        dst = refs_dir / ref_file.name
-                        if not dst.exists():
-                            dst.write_text(ref_file.read_text(encoding="utf-8"), encoding="utf-8")
+                # Copy arch references to the skill directory
+                PluginReportGenerator._copy_arch_references_to_skill_dir(sf.parent)
             except Exception as e:
                 print(f"warning: failed to write skill to {sf}: {e}", file=sys.stderr)
+
+    @staticmethod
+    def post_env_installation_hook(env_skill_dir: Path, root_path: Path = None) -> None:
+        """Post environment installation hook that writes arch instructions.
+        
+        This hook is called after graphify installs to an environment.
+        It writes arch references and instructions only for the environment
+        that was just installed.
+        
+        Args:
+            env_skill_dir: Path to the environment's skill directory (e.g., ~/.claude/skills/graphify/)
+            root_path: Optional project root path for project-scoped installations
+        """
+        import sys
+        
+        if not env_skill_dir.exists():
+            return
+            
+        # Copy arch references to the skill directory
+        PluginReportGenerator._copy_arch_references_to_skill_dir(env_skill_dir)
+        
+        # Write arch instructions to the skill file if it exists
+        skill_file = env_skill_dir / "SKILL.md"
+        if skill_file.exists():
+            try:
+                content = skill_file.read_text(encoding="utf-8")
+                original_content = content
+                
+                # Update old reference filenames to new arch- prefixed ones
+                old_refs = {
+                    "- `config.md`": "- `arch-config.md`",
+                    "- `commands.md`": "- `arch-commands.md`",
+                    "- `audit.md`": "- `arch-audit.md`",
+                    "- `context.md`": "- `arch-context.md`",
+                }
+                for old, new in old_refs.items():
+                    if old in content:
+                        content = content.replace(old, new)
+                
+                if "graphify-arch: Architecture Enforcement" not in content:
+                    skill_section = """
+---
+
+## graphify-arch: Architecture Enforcement
+
+### What graphify-arch is for
+
+Enforce architectural rules on a codebase. The AI agent defines layers, tiers, and dependency constraints in `graphify-out/arch/config.json`. The plugin enforces them on every graphify run and reports violations.
+
+### Usage
+
+| Command | Description |
+|---------|-------------|
+| `graphify arch` | Show help and available commands |
+| `graphify arch audit` | Check all files for architectural violations |
+| `graphify arch set-status <file> <status> [msg]` | Override compliance status for a file |
+| `graphify arch update-component <json-file>` | Update component metadata from JSON |
+| `graphify arch discover-ontology` | Print current ontology config |
+| `graphify arch query-file --path <file>` | Query nodes for a specific file |
+| `graphify arch compile-context --target <id>` | Compile subgraph context for LLM input |
+| `graphify arch semantic-search --query <text>` | Vector similarity search over code |
+| `graphify arch analyze` | Validate config syntax and consistency |
+| `graphify arch setup-embeddings` | Download ONNX embedding model |
+
+### Agent workflow
+
+1. **Analyze the codebase** — understand directory structure, identify natural layers
+2. **Generate `graphify-out/arch/config.json`** — define fields, assignment rules, and dependency constraints
+3. **Before code changes** — `graphify arch audit` to check for existing violations
+4. **After code changes** — `graphify arch audit` to verify compliance
+5. **Override intentional violations** — `graphify arch set-status <file> COMPLIANT "reason"`
+
+### References
+
+Full documentation is available in the `references/` folder alongside this skill file:
+- `arch-config.md` — full config schema, field types, assignment rules, handlers, examples
+- `arch-commands.md` — all CLI commands with arguments and output format
+- `arch-audit.md` — interpreting violations and fixing them
+- `arch-context.md` — compiling subgraph context for LLM input
+"""
+                    new_content = content.rstrip() + "\n\n" + skill_section.strip() + "\n"
+                    skill_file.write_text(new_content, encoding="utf-8")
+                    print(f"  arch skill section added to {skill_file}")
+                elif content != original_content:
+                    skill_file.write_text(content, encoding="utf-8")
+                    print(f"  arch references updated in {skill_file}")
+            except Exception as e:
+                print(f"warning: failed to write arch instructions to {skill_file}: {e}", file=sys.stderr)
+
+    @staticmethod
+    def on_graphify_install(env_skill_dir: Path) -> None:
+        """Hook that graphify can call after installing to an environment.
+        
+        This function is called by graphify after it installs to an environment.
+        It writes arch references and instructions to the environment's skill directory.
+        
+        Args:
+            env_skill_dir: Path to the environment's skill directory (e.g., ~/.claude/skills/graphify/)
+        """
+        PluginReportGenerator.post_env_installation_hook(env_skill_dir)
 
     @staticmethod
     def generate_report(report_text: str, G, communities: dict, root: str, plugin_instance) -> str:
@@ -671,6 +977,8 @@ Enforce architectural rules on a codebase. The AI agent defines layers, tiers, a
                 all_fields[f_name] = f_cfg
 
         for f_name, f_cfg in sorted(all_fields.items()):
+            if not f_cfg.values:
+                continue
             field_summary = {}
             for node_id, node_data in G.nodes(data=True):
                 sf = node_data.get("source_file")
@@ -765,14 +1073,6 @@ Enforce architectural rules on a codebase. The AI agent defines layers, tiers, a
                         lines.append(f"  * [{rule} ({origin})] {msg}")
 
         lines.append("")
-        lines.append("### Active Architectural Rules")
-        for dir_name in ontology.directories:
-            fields = ontology.get_fields_for_file(dir_name)
-            for name, f_config in fields.items():
-                if f_config.handler == "dependency_check":
-                    for rule in f_config.rules:
-                        lines.append(f"- `[{dir_name}]` `{name}` rule: `{rule.source}` &rarr; `{rule.target}` ({rule.severity})")
-
         report_text += "\n" + "\n".join(lines)
         
         out_dir = root_path / "graphify-out" / "arch"
