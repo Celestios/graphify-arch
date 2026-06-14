@@ -683,6 +683,147 @@ class TestEndToEndPipeline(unittest.TestCase):
         self.assertEqual(node_res["ai_summary"], "Test Summary")
         self.assertEqual(node_res["raw_code"], "class GraphDataController {}")
 
+    def test_assign_metadata_assigns_clean_and_prefixed_keys(self):
+        from plugin import ArchPlugin
+        plugin = ArchPlugin()
+        plugin.db_path = self.db_path
+        
+        nid = "lib/features/graph/store/graph_data_controller.dart::GraphDataController"
+        fid = "lib/features/graph/store/graph_data_controller.dart"
+        
+        G = nx.MultiDiGraph()
+        G.add_node(nid, source_file="lib/features/graph/store/graph_data_controller.dart", label="GraphDataController", type="Class")
+        G.add_node(fid, source_file="lib/features/graph/store/graph_data_controller.dart", label="graph_data_controller.dart", type="File")
+        
+        # 1. Setup DB records for these
+        from schema import SemanticFacets
+        sem = SemanticFacets()
+        sem.layer = "Application"
+        sem.tier = 2
+        node = CodeNode(
+            id=nid, filepath="lib/features/graph/store/graph_data_controller.dart",
+            node_type=AstNodeType.CLASS, start_byte=0, end_byte=100, ast_hash="h1",
+            raw_code="", semantics=sem, ai_summary="Summarized node"
+        )
+        fnode = CodeNode(
+            id=fid, filepath="lib/features/graph/store/graph_data_controller.dart",
+            node_type=AstNodeType.FILE, start_byte=0, end_byte=100, ast_hash="h1",
+            raw_code="", semantics=SemanticFacets(), ai_summary=None
+        )
+        self.db.sync_nodes("lib/features/graph/store/graph_data_controller.dart", [node, fnode])
+        self.db.update_node_metadata(nid, summary="Summarized node")
+        
+        # Save component status and manual fields
+        self.db.save_component(
+            "lib/features/graph/store/graph_data_controller.dart",
+            "COMPLIANT", "COMPLIANT",
+            {"ai_summary": "Summarized component", "pattern": "Controller"},
+            []
+        )
+        
+        # 2. Call _assign_metadata
+        plugin._assign_metadata(G, self.ontology, self.temp_dir, db=self.db)
+        
+        # 3. Assert clean and prefixed keys on the graph nodes
+        class_node_data = G.nodes[nid]
+        self.assertEqual(class_node_data.get("layer"), "Application")
+        self.assertEqual(class_node_data.get("arch_meta_layer"), "Application")
+        self.assertEqual(class_node_data.get("tier"), 2)
+        self.assertEqual(class_node_data.get("arch_meta_tier"), 2)
+        # The class node does NOT get the component-level ai_summary
+        self.assertIsNone(class_node_data.get("ai_summary"))
+        self.assertIsNone(class_node_data.get("arch_meta_ai_summary"))
+        
+        file_node_data = G.nodes[fid]
+        self.assertEqual(file_node_data.get("status"), "COMPLIANT")
+        self.assertEqual(file_node_data.get("arch_meta_status"), "COMPLIANT")
+        self.assertEqual(file_node_data.get("pattern"), "Controller")
+        self.assertEqual(file_node_data.get("arch_meta_pattern"), "Controller")
+        # The file node GETS the component-level ai_summary
+        self.assertEqual(file_node_data.get("ai_summary"), "Summarized component")
+        self.assertEqual(file_node_data.get("arch_meta_ai_summary"), "Summarized component")
+
+    def test_update_nodes_status_optional(self):
+        # 1. Setup nodes and components in DB
+        nid1 = "lib/features/graph/store/graph_data_controller.dart::GraphDataController"
+        nid2 = "lib/features/graph/engine/logic.dart::Logic"
+        
+        # Node 1 (in a file we'll update with status)
+        node1 = CodeNode(
+            id=nid1, filepath="lib/features/graph/store/graph_data_controller.dart",
+            node_type=AstNodeType.CLASS, start_byte=0, end_byte=100, ast_hash="h1",
+            raw_code="", semantics=SemanticFacets()
+        )
+        # Node 2 (in a file we'll update without status)
+        node2 = CodeNode(
+            id=nid2, filepath="lib/features/graph/engine/logic.dart",
+            node_type=AstNodeType.CLASS, start_byte=0, end_byte=100, ast_hash="h1",
+            raw_code="", semantics=SemanticFacets()
+        )
+        self.db.sync_nodes("lib/features/graph/store/graph_data_controller.dart", [node1])
+        self.db.sync_nodes("lib/features/graph/engine/logic.dart", [node2])
+        
+        # Save initial component statuses
+        self.db.save_component("lib/features/graph/store/graph_data_controller.dart", "PENDING_AUDIT", "PENDING_AUDIT", {}, [])
+        self.db.save_component("lib/features/graph/engine/logic.dart", "COMPLIANT", "COMPLIANT", {}, [])
+        
+        # 2. Write payload file
+        payload = [
+            {
+                "id": nid1,
+                "summary": "Updated summary 1",
+                "status": "VIOLATION_DETECTED"
+            },
+            {
+                "id": nid2,
+                "summary": "Updated summary 2"
+                # "status" is omitted/optional here
+            }
+        ]
+        
+        fd, payload_path = tempfile.mkstemp(suffix=".json")
+        try:
+            with open(payload_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+                
+            from main import handle_update_nodes
+            from project import Workspace
+            
+            class MockArgs:
+                payload_file = payload_path
+                
+            workspace = Workspace(
+                root_dir=self.temp_dir,
+                db_path=self.db_path,
+                config_path=Path(self.config_path),
+                config=self.config
+            )
+            
+            handle_update_nodes(MockArgs(), workspace, self.db)
+            
+            # 3. Assert database state
+            # Node 1: status is updated to VIOLATION_DETECTED
+            comp1 = self.db.get_component("lib/features/graph/store/graph_data_controller.dart")
+            self.assertEqual(comp1["status"], "VIOLATION_DETECTED")
+            
+            # Node 2: status is NOT updated and remains COMPLIANT
+            comp2 = self.db.get_component("lib/features/graph/engine/logic.dart")
+            self.assertEqual(comp2["status"], "COMPLIANT")
+            
+            # Both summaries are updated
+            updated_node1 = self.db.get_node(nid1)
+            updated_node2 = self.db.get_node(nid2)
+            self.assertEqual(updated_node1.ai_summary, "Updated summary 1")
+            self.assertEqual(updated_node2.ai_summary, "Updated summary 2")
+            
+        finally:
+            import os
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            Path(payload_path).unlink(missing_ok=True)
+
 
 def os_close_fd(fd):
     """Close a file descriptor safely."""

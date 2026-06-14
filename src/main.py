@@ -210,8 +210,10 @@ def handle_update_nodes(args, workspace, database) -> None:
             role=update.get("role"),
             pattern=update.get("pattern"),
             purity=update.get("purity"),
-            embedding_bytes=bytes.fromhex(update["embedding"]) if "embedding" in update else None
+            embedding_bytes=bytes.fromhex(update["embedding"]) if "embedding" in update else None,
+            status=update.get("status")
         )
+    database.sync_to_graph_json(workspace.root_dir, workspace.config.ontology)
     print("Updated nodes successfully.")
 
 

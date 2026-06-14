@@ -7,7 +7,7 @@ from plugins import PluginHookInterface
 from db import Violation, Database
 from propagator import propagate_metadata
 from auditor import audit_architecture_rules
-from schema import OntologyConfig, FieldConfig, FieldRuleConfig, AssignmentCondition, MetadataAssignmentRule
+from schema import OntologyConfig, FieldConfig, FieldRuleConfig, AssignmentCondition, MetadataAssignmentRule, AstNodeType
 from utils import resolve_relative_path
 
 # Import delegated helper handlers to satisfy SRP
@@ -156,7 +156,18 @@ class ArchPlugin(PluginHookInterface):
                     val = field_config.default
                     data["arch_meta_requires_audit"] = True
                     
+                # Component-level ai_summary is restricted to FILE nodes to keep scopes separate.
+                node_type_str = data.get("type") or "Function"
+                try:
+                    node_type = AstNodeType.from_str(node_type_str)
+                except Exception:
+                    node_type = None
+
+                if field_name == "ai_summary" and node_type not in (AstNodeType.FILE, AstNodeType.MODULE):
+                    continue
+
                 data[f"arch_meta_{field_name}"] = val
+                data[field_name] = val
 
             automatic_cfg = ontology.get_automatic_fields_for_file(rel_source_file)
             for field_name, field_config in automatic_cfg.items():
@@ -166,6 +177,7 @@ class ArchPlugin(PluginHookInterface):
                 if prev_val is not None and field_config.values is not None and prev_val not in field_config.values:
                     print(f"warning: value '{prev_val}' for automatic field '{field_name}' in '{rel_source_file}' is no longer allowed. Resetting to default '{field_config.default}' and marking for audit.", file=sys.stderr)
                     data[f"arch_meta_{field_name}"] = field_config.default
+                    data[field_name] = field_config.default
                     data["arch_meta_requires_audit"] = True
                     continue
 
@@ -217,8 +229,14 @@ class ArchPlugin(PluginHookInterface):
                         data["arch_meta_requires_audit"] = True
                         
                 data[f"arch_meta_{field_name}"] = assigned_value
+                data[field_name] = assigned_value
 
             if comp_info:
+                status = comp_info.get("status")
+                if status:
+                    data["arch_meta_status"] = status
+                    data["status"] = status
+
                 manual_status = comp_info.get("manual_status")
                 if manual_status is not None:
                     data["arch_meta_manual_status"] = manual_status
@@ -243,7 +261,9 @@ class ArchPlugin(PluginHookInterface):
 
         try:
             try:
-                db = Database(str(self.db_path))
+                from project import ConfigLoader
+                _, db_path = ConfigLoader.find_config(root)
+                db = Database(str(db_path))
             except Exception:
                 db = None
 
@@ -319,7 +339,9 @@ class ArchPlugin(PluginHookInterface):
         violations = audit_architecture_rules(G, ontology, root)
         
         try:
-            db = Database(str(self.db_path))
+            from project import ConfigLoader
+            _, db_path = ConfigLoader.find_config(root)
+            db = Database(str(db_path))
             all_violations = db.update_violations_and_statuses(violations, ontology, root, G)
             db.sync_graph_metadata(G, root)
             
@@ -423,14 +445,15 @@ class ArchPlugin(PluginHookInterface):
 
     def on_report(self, report_text: str, G, communities: dict, root) -> str:
         root = Path(root)
-        has_arch_meta = any(
-            any(k.startswith("arch_meta_") for k in d)
-            for _, d in G.nodes(data=True)
-        )
-        if not has_arch_meta:
+        try:
+            ontology = self.load_ontology(root)
             try:
-                ontology = self.load_ontology(root)
-                self._assign_metadata(G, ontology, root)
+                from project import ConfigLoader
+                _, db_path = ConfigLoader.find_config(root)
+                db = Database(str(db_path))
             except Exception:
-                pass
+                db = None
+            self._assign_metadata(G, ontology, root, db=db)
+        except Exception:
+            pass
         return PluginReportGenerator.generate_report(report_text, G, communities, root, self)

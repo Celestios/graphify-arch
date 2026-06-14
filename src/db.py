@@ -566,8 +566,9 @@ class Database:
                              role: Optional[str] = None,
                              pattern: Optional[str] = None,
                              purity: Optional[str] = None,
-                             embedding_bytes: Optional[bytes] = None):
-        """Updates specific node metadata and resets the dirty flag[cite: 3]."""
+                             embedding_bytes: Optional[bytes] = None,
+                             status: Optional[str] = None):
+        """Updates specific node metadata and resets the dirty flag."""
         node = self.get_node(node_id)
         if not node: return
 
@@ -585,6 +586,9 @@ class Database:
             WHERE id = ?
         """, (semantics_json, node.ai_summary, embedding_bytes, node_id))
         self.conn.commit()
+
+        if status:
+            self.set_component_status(node.filepath, status, "")
 
     def sync_graph_metadata(self, G, root: Path):
         """Write arch_meta_* from graph nodes back to nodes.semantics in DB."""
