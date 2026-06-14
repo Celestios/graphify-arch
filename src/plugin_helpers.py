@@ -957,6 +957,8 @@ Full documentation is available in the `references/` folder alongside this skill
                 all_fields[f_name] = f_cfg
 
         for f_name, f_cfg in sorted(all_fields.items()):
+            if not f_cfg.values:
+                continue
             field_summary = {}
             for node_id, node_data in G.nodes(data=True):
                 sf = node_data.get("source_file")
@@ -1051,14 +1053,6 @@ Full documentation is available in the `references/` folder alongside this skill
                         lines.append(f"  * [{rule} ({origin})] {msg}")
 
         lines.append("")
-        lines.append("### Active Architectural Rules")
-        for dir_name in ontology.directories:
-            fields = ontology.get_fields_for_file(dir_name)
-            for name, f_config in fields.items():
-                if f_config.handler == "dependency_check":
-                    for rule in f_config.rules:
-                        lines.append(f"- `[{dir_name}]` `{name}` rule: `{rule.source}` &rarr; `{rule.target}` ({rule.severity})")
-
         report_text += "\n" + "\n".join(lines)
         
         out_dir = root_path / "graphify-out" / "arch"
