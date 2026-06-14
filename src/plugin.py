@@ -247,7 +247,8 @@ class ArchPlugin(PluginHookInterface):
                         match = True
                         
                         if conds.path_prefix is not None:
-                            if not rel_source_file.startswith(conds.path_prefix):
+                            prefix = conds.path_prefix
+                            if not (rel_source_file == prefix or rel_source_file.startswith(prefix + "/")):
                                 match = False
                         
                         if conds.file_name is not None:
