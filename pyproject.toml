@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graphify-arch"
-version = "0.1.3"
+version = "0.1.9"
 description = "Architecture enforcement plugin for graphify"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -26,8 +26,11 @@ arch = "plugin:ArchPlugin"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["references"]
 py-modules = ["plugin", "plugin_helpers", "plugins", "propagator", "auditor", "embedder", "main", "cli", "compiler", "db", "project", "schema", "utils"]
 
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["references*"]
+
 [tool.setuptools.package-data]
-"references" = ["*.md"]
+references = ["*.md"]

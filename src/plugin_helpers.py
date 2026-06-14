@@ -656,18 +656,38 @@ class PluginReportGenerator:
         import sys
         refs_src = Path(__file__).parent / "references"
         if not refs_src.exists():
+            try:
+                refs_src = Path(__file__).resolve().parent / "references"
+            except Exception:
+                pass
+        if not refs_src.exists():
+            try:
+                import plugin_helpers
+                refs_src = Path(plugin_helpers.__file__).parent / "references"
+            except Exception:
+                pass
+        if not refs_src.exists():
+            try:
+                refs_src = Path(__file__).resolve().parent.parent / "references"
+            except Exception:
+                pass
+        if not refs_src.exists():
             print(f"warning: arch references source not found at {refs_src}", file=sys.stderr)
             return
             
         refs_dst = skill_dir / "references"
         refs_dst.mkdir(parents=True, exist_ok=True)
         
+        copied = 0
         for ref_file in refs_src.glob("*.md"):
             dst_file = refs_dst / ref_file.name
             try:
                 shutil.copy2(ref_file, dst_file)
+                copied += 1
             except Exception as e:
                 print(f"warning: failed to copy reference {ref_file.name} to {refs_dst}: {e}", file=sys.stderr)
+        if copied > 0:
+            print(f"  arch references   ->  {refs_dst} ({copied} files)")
 
     @staticmethod
     def write_always_on_prompts(root_path: Path, G, violations: list, ontology):

@@ -43,6 +43,9 @@ class ArchPlugin(PluginHookInterface):
                 sys.exit(1)
             PluginCLIHandler.handle_arch_cli(Path.cwd(), args[1:], self)
             sys.exit(0)
+        elif cmd == "install":
+            PluginCLIHandler.handle_arch_cli(Path.cwd(), ["install"], self)
+            sys.exit(0)
         elif cmd == "query" and "--semantic" in args:
             PluginCLIHandler.handle_semantic_query(Path.cwd(), args[1:])
             sys.exit(0)
