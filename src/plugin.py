@@ -231,6 +231,7 @@ class ArchPlugin(PluginHookInterface):
         self._assign_edge_weights(G, ontology, root)
         if db:
             db.sync_graph_metadata(G, root)
+            db.sync_to_graph_json(root, ontology)
         return G
 
     def on_post_build(self, G, extraction: dict, root):

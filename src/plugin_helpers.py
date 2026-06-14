@@ -221,7 +221,7 @@ Config:
             
         elif parsed_args.arch_command == "setup-embeddings":
             from embedder import LocalEmbedder
-            embedder = LocalEmbedder()
+            embedder = LocalEmbedder(download=True)
             print("Embeddings setup completed successfully.")
             sys.exit(0)
             
@@ -354,41 +354,7 @@ Config:
             
             db.set_component_status_bulk(payload, ontology, root)
             
-            graph_path = root / "graphify-out" / "graph.json"
-            if graph_path.exists():
-                try:
-                    graph_data = json.loads(graph_path.read_text(encoding="utf-8"))
-                    nodes = graph_data.get("nodes", [])
-                    modified = False
-                    for node in nodes:
-                        sf = node.get("source_file") or ""
-                        if sf:
-                            try:
-                                rel_sf = Path(sf).relative_to(root).as_posix()
-                            except ValueError:
-                                rel_sf = Path(sf).as_posix()
-                            for raw_key, entry_data in payload.items():
-                                from utils import resolve_relative_path as _rlp
-                                rel_key = _rlp(raw_key, root)
-                                if rel_sf == rel_key or rel_sf.endswith(rel_key) or rel_key.endswith(rel_sf):
-                                    status = (entry_data.get("status") or "").upper()
-                                    if status in ("COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"):
-                                        node["arch_meta_manual_status"] = status
-                                    violations_raw = entry_data.get("violations", "")
-                                    if isinstance(violations_raw, list):
-                                        violations_msg = " | ".join(str(v) for v in violations_raw)
-                                    else:
-                                        violations_msg = str(violations_raw) if violations_raw else ""
-                                    node["arch_meta_manual_violations"] = violations_msg
-                                    for field_name, field_val in entry_data.items():
-                                        if field_name not in ("status", "violations"):
-                                            node[f"arch_meta_{field_name}"] = field_val
-                                    modified = True
-                    if modified:
-                        graph_path.write_text(json.dumps(graph_data, ensure_ascii=False), encoding="utf-8")
-                except Exception as e:
-                    print(f"warning: failed to update graph.json: {e}", file=sys.stderr)
-            
+            db.sync_to_graph_json(root, ontology)
             print(f"Updated {len(payload)} component(s).")
             sys.exit(0)
 
@@ -399,10 +365,30 @@ Config:
             try:
                 config_path, db_path = ConfigLoader.find_config(root)
                 db = Database(str(db_path))
+                ontology = ConfigLoader.load(config_path).ontology
             except Exception as e:
                 print(f"error: failed to load database: {e}", file=sys.stderr)
                 sys.exit(1)
             
+            comp = db.get_component(parsed_args.path)
+            comp_dict = None
+            if comp:
+                comp_dict = {
+                    "filepath": parsed_args.path,
+                    "status": comp.get("status"),
+                    "manual_status": comp.get("manual_status"),
+                    "manual_fields": comp.get("manual_fields"),
+                    "violations": comp.get("violations")
+                }
+            else:
+                comp_dict = {
+                    "filepath": parsed_args.path,
+                    "status": "Unknown",
+                    "manual_status": None,
+                    "manual_fields": {},
+                    "violations": []
+                }
+
             nodes = db._get_all_nodes_internal().values()
             results = []
             for n in nodes:
@@ -426,10 +412,19 @@ Config:
                         "raw_code": n.raw_code if parsed_args.include_body else None
                     }
                     sem = n.semantics
-                    for field_name in ("layer", "tier", "purity", "architectural_role", "pattern"):
-                        result[field_name] = sem.fields.get(field_name, "Unknown")
+                    fields_cfg = ontology.get_fields_for_file(n.filepath)
+                    for field_name in fields_cfg.keys():
+                        if field_name == "ai_summary":
+                            result[field_name] = n.ai_summary or "Unknown"
+                        else:
+                            result[field_name] = sem.fields.get(field_name, "Unknown")
                     results.append(result)
-            print(json.dumps(results, indent=2))
+
+            output = {
+                "component": comp_dict,
+                "nodes": results
+            }
+            print(json.dumps(output, indent=2))
             sys.exit(0)
 
         elif parsed_args.arch_command == "compile-context":
@@ -460,7 +455,10 @@ Config:
                 print(f"error: failed to load database: {e}", file=sys.stderr)
                 sys.exit(1)
             
-            embedder = LocalEmbedder()
+            try:
+                embedder = LocalEmbedder()
+            except FileNotFoundError:
+                sys.exit(1)
             query_emb = embedder.embed(parsed_args.query)
             res = db.semantic_vector_search(query_emb, parsed_args.limit)
             print(json.dumps(res, indent=2))
@@ -498,7 +496,10 @@ Config:
             sys.exit(1)
             
         from embedder import LocalEmbedder
-        embedder = LocalEmbedder()
+        try:
+            embedder = LocalEmbedder()
+        except FileNotFoundError:
+            sys.exit(1)
         query_vector = np.array(embedder.embed(question), dtype=np.float32)
         
         with open(bin_path, "rb") as f:

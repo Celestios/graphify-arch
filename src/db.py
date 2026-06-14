@@ -203,6 +203,7 @@ class Database:
             self._set_violations(matched_key, filtered_violations)
 
         self.conn.commit()
+        self.sync_to_graph_json(root, ontology)
 
     def update_violations_and_statuses(self, violations: List[Any], ontology, root: Path, G: Optional[Any] = None) -> List[Dict[str, Any]]:
         import sys
@@ -271,6 +272,7 @@ class Database:
             all_aggregated_violations.extend(aggregated)
 
         self.conn.commit()
+        self.sync_to_graph_json(root, ontology)
         return all_aggregated_violations
 
     def _create_tables(self):
@@ -615,6 +617,93 @@ class Database:
                     "UPDATE nodes SET semantics = ?, ai_summary = ? WHERE id = ?",
                     (semantics_json, node.ai_summary, node_id))
         self.conn.commit()
+
+    def sync_to_graph_json(self, root: Path, ontology: OntologyConfig):
+        """
+        Synchronizes all metadata from the SQLite database (nodes and components tables)
+        back into graphify-out/graph.json.
+        """
+        graph_path = root / "graphify-out" / "graph.json"
+        if not graph_path.exists():
+            return
+
+        try:
+            # 1. Load database nodes and components in memory
+            db_nodes = self._get_all_nodes_internal()
+            db_components = self.get_all_components()
+
+            # 2. Load graph.json
+            with open(graph_path, "r", encoding="utf-8") as f:
+                graph_data = json.load(f)
+
+            # 3. Update nodes in graph_data
+            modified = False
+            for node in graph_data.get("nodes", []):
+                node_id = node.get("id")
+                if not node_id:
+                    continue
+
+                db_node = db_nodes.get(node_id)
+                if db_node:
+                    # Sync node-level configured metadata dynamically from ontology
+                    fields_cfg = ontology.get_fields_for_file(db_node.filepath)
+                    for field_name in fields_cfg.keys():
+                        if field_name == "ai_summary":
+                            val = db_node.ai_summary
+                        else:
+                            val = db_node.semantics.fields.get(field_name)
+
+                        if val is not None and val != "Unknown":
+                            node[f"arch_meta_{field_name}"] = val
+                            node[field_name] = val
+
+                    # Also find component info for the node's file
+                    from utils import resolve_relative_path
+                    sf = node.get("source_file")
+                    if sf:
+                        rel_sf = resolve_relative_path(sf, root)
+                        comp = db_components.get(rel_sf)
+                        if not comp:
+                            for k, c in db_components.items():
+                                if k.endswith(rel_sf) or rel_sf.endswith(k):
+                                    comp = c
+                                    break
+
+                        if comp:
+                            # Sync component status
+                            status = comp.get("status")
+                            if status:
+                                node["arch_meta_status"] = status
+                                node["status"] = status
+
+                            # Sync manual status
+                            manual_status = comp.get("manual_status")
+                            if manual_status:
+                                node["arch_meta_manual_status"] = manual_status
+
+                            # Sync manual violations msg
+                            violations_msg = " | ".join(v["message"] for v in comp.get("violations", []) if v.get("origin") == "manual")
+                            if violations_msg:
+                                node["arch_meta_manual_violations"] = violations_msg
+
+                            # Sync manual fields (like ai_summary, pattern, etc.)
+                            manual_fields = comp.get("manual_fields") or {}
+                            for field_name, val in manual_fields.items():
+                                if val is not None and val != "Unknown":
+                                    if field_name == "ai_summary" and db_node.node_type != AstNodeType.FILE:
+                                        continue
+                                    node[f"arch_meta_{field_name}"] = val
+                                    node[field_name] = val
+
+                    modified = True
+
+            if modified:
+                with open(graph_path, "w", encoding="utf-8") as f:
+                    json.dump(graph_data, f, ensure_ascii=False, indent=2)
+
+        except Exception as e:
+            import sys
+            print(f"warning: failed to sync database back to graph.json: {e}", file=sys.stderr)
 
 
 class GraphBuilder:

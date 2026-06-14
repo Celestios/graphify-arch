@@ -4,7 +4,7 @@ import onnxruntime as ort
 from tokenizers import Tokenizer
 
 
-def bootstrap_embedding_model() -> tuple[Path, Path]:
+def bootstrap_embedding_model(download: bool = False) -> tuple[Path, Path]:
     """Resolves local storage bounds and retrieves the ONNX embedding model assets if needed."""
     import urllib.request
     home_dir = Path.home()
@@ -14,6 +14,9 @@ def bootstrap_embedding_model() -> tuple[Path, Path]:
     tokenizer_path = model_dir / "tokenizer.json"
 
     if not model_path.exists() or not tokenizer_path.exists():
+        if not download:
+            raise FileNotFoundError("Embedding model files not found. Run 'graphify arch setup-embeddings' first.")
+            
         model_dir.mkdir(parents=True, exist_ok=True)
         MODEL_URL = "https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/model.onnx"
         TOKENIZER_URL = "https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/tokenizer.json"
@@ -38,11 +41,16 @@ def bootstrap_embedding_model() -> tuple[Path, Path]:
 
 class LocalEmbedder:
 
-    def __init__(self):
+    def __init__(self, download: bool = False):
         """
         Cold-boots the embedding environment by initializing the ONNX optimization pipeline.
         """
-        model_path, tokenizer_path = bootstrap_embedding_model()
+        try:
+            model_path, tokenizer_path = bootstrap_embedding_model(download=download)
+        except FileNotFoundError as e:
+            import sys
+            print(f"warning: {e}", file=sys.stderr)
+            raise e
 
         try:
             self.tokenizer = Tokenizer.from_file(str(tokenizer_path))

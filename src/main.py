@@ -101,6 +101,7 @@ def handle_reindex(args, workspace, database) -> None:
             cursor.execute("UPDATE nodes SET semantics = ? WHERE id = ?",
                            (json.dumps(dataclasses.asdict(new_sem.semantics)), node_id))
     database.conn.commit()
+    database.sync_to_graph_json(workspace.root_dir, workspace.config.ontology)
 
     print("Reindexing and ontology semantic propagation completed.")
 
@@ -136,6 +137,26 @@ def handle_audit(args, workspace, database) -> None:
 
 
 def handle_query_file(args, workspace, database) -> None:
+    comp = database.get_component(args.path)
+    comp_dict = None
+    if comp:
+        comp_dict = {
+            "filepath": args.path,
+            "status": comp.get("status"),
+            "manual_status": comp.get("manual_status"),
+            "manual_fields": comp.get("manual_fields"),
+            "violations": comp.get("violations")
+        }
+    else:
+        comp_dict = {
+            "filepath": args.path,
+            "status": "Unknown",
+            "manual_status": None,
+            "manual_fields": {},
+            "violations": []
+        }
+
+    ontology = workspace.config.ontology
     nodes = database._get_all_nodes_internal().values()
     results = []
     for n in nodes:
@@ -156,13 +177,26 @@ def handle_query_file(args, workspace, database) -> None:
             if args.impl_methods and f"impl_{args.impl_methods}" in n.id:
                 match = True
         if match:
-            results.append({
+            result = {
                 "id": n.id,
                 "filepath": n.filepath,
                 "node_type": n.node_type.value,
                 "raw_code": n.raw_code if args.include_body else None
-            })
-    print(json.dumps(results, indent=2))
+            }
+            sem = n.semantics
+            fields_cfg = ontology.get_fields_for_file(n.filepath)
+            for field_name in fields_cfg.keys():
+                if field_name == "ai_summary":
+                    result[field_name] = n.ai_summary or "Unknown"
+                else:
+                    result[field_name] = sem.fields.get(field_name, "Unknown")
+            results.append(result)
+
+    output = {
+        "component": comp_dict,
+        "nodes": results
+    }
+    print(json.dumps(output, indent=2))
 
 
 def handle_update_nodes(args, workspace, database) -> None:
@@ -182,7 +216,10 @@ def handle_update_nodes(args, workspace, database) -> None:
 
 
 def handle_semantic_search(args, workspace, database) -> None:
-    embedder = LocalEmbedder()
+    try:
+        embedder = LocalEmbedder()
+    except FileNotFoundError:
+        sys.exit(1)
     query_emb = embedder.embed(args.query)
     res = database.semantic_vector_search(query_emb, args.limit)
     print(json.dumps(res, indent=2))

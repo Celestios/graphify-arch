@@ -527,6 +527,162 @@ class TestEndToEndPipeline(unittest.TestCase):
         self.assertEqual(G.nodes["store"].get("arch_meta_tier"), 2)
         self.assertEqual(G.nodes["engine"].get("arch_meta_tier"), 3)
 
+    def test_sync_to_graph_json(self):
+        # 1. Setup a mock graphify-out/graph.json
+        graphify_out = self.temp_dir / "graphify-out"
+        graphify_out.mkdir(parents=True, exist_ok=True)
+        graph_json_path = graphify_out / "graph.json"
+        
+        nid = "lib/features/graph/store/graph_data_controller.dart::GraphDataController"
+        fid = "lib/features/graph/store/graph_data_controller.dart"
+        mock_graph = {
+            "nodes": [
+                {
+                    "id": nid,
+                    "label": "GraphDataController",
+                    "type": "Class",
+                    "source_file": "lib/features/graph/store/graph_data_controller.dart"
+                },
+                {
+                    "id": fid,
+                    "label": "graph_data_controller.dart",
+                    "type": "File",
+                    "source_file": "lib/features/graph/store/graph_data_controller.dart"
+                }
+            ],
+            "links": []
+        }
+        with open(graph_json_path, "w", encoding="utf-8") as f:
+            json.dump(mock_graph, f)
+            
+        # 2. Add node & component info in database
+        from schema import SemanticFacets
+        sem = SemanticFacets()
+        sem.layer = "Application"
+        sem.tier = 2
+        node = CodeNode(
+            id=nid, filepath="lib/features/graph/store/graph_data_controller.dart",
+            node_type=AstNodeType.CLASS, start_byte=0, end_byte=100, ast_hash="h1",
+            raw_code="", semantics=sem, ai_summary="Summarized node"
+        )
+        fnode = CodeNode(
+            id=fid, filepath="lib/features/graph/store/graph_data_controller.dart",
+            node_type=AstNodeType.FILE, start_byte=0, end_byte=100, ast_hash="h1",
+            raw_code="", semantics=SemanticFacets(), ai_summary=None
+        )
+        self.db.sync_nodes("lib/features/graph/store/graph_data_controller.dart", [node, fnode])
+        self.db.update_node_metadata(nid, summary="Summarized node")
+        
+        # Save component status and manual fields
+        self.db.save_component(
+            "lib/features/graph/store/graph_data_controller.dart",
+            "COMPLIANT", "COMPLIANT",
+            {"ai_summary": "Summarized component", "pattern": "Controller"},
+            []
+        )
+        
+        # 3. Trigger sync_to_graph_json
+        self.db.sync_to_graph_json(self.temp_dir, self.ontology)
+        
+        # 4. Assert graph.json is enriched
+        with open(graph_json_path, "r", encoding="utf-8") as f:
+            updated_graph = json.load(f)
+            
+        updated_nodes = {n["id"]: n for n in updated_graph["nodes"]}
+        
+        # Class node has its own node-level ai_summary
+        class_node = updated_nodes[nid]
+        self.assertEqual(class_node.get("layer"), "Application")
+        self.assertEqual(class_node.get("tier"), 2)
+        self.assertEqual(class_node.get("ai_summary"), "Summarized node")
+        self.assertEqual(class_node.get("arch_meta_layer"), "Application")
+        self.assertEqual(class_node.get("arch_meta_tier"), 2)
+        self.assertEqual(class_node.get("arch_meta_ai_summary"), "Summarized node")
+        
+        # File node has component-level status, manual fields
+        file_node = updated_nodes[fid]
+        self.assertEqual(file_node.get("status"), "COMPLIANT")
+        self.assertEqual(file_node.get("arch_meta_status"), "COMPLIANT")
+        self.assertEqual(file_node.get("ai_summary"), "Summarized component")
+        self.assertEqual(file_node.get("arch_meta_ai_summary"), "Summarized component")
+        self.assertEqual(file_node.get("pattern"), "Controller")
+        self.assertEqual(file_node.get("arch_meta_pattern"), "Controller")
+
+    def test_query_file_output_format(self):
+        # 1. Setup a node in DB
+        nid = "lib/features/graph/store/graph_data_controller.dart::GraphDataController"
+        from schema import SemanticFacets
+        sem = SemanticFacets()
+        sem.layer = "Application"
+        sem.tier = 2
+        node = CodeNode(
+            id=nid, filepath="lib/features/graph/store/graph_data_controller.dart",
+            node_type=AstNodeType.CLASS, start_byte=0, end_byte=100, ast_hash="h1",
+            raw_code="class GraphDataController {}", semantics=sem, ai_summary="Test Summary"
+        )
+        self.db.sync_nodes("lib/features/graph/store/graph_data_controller.dart", [node])
+        self.db.update_node_metadata(nid, summary="Test Summary")
+        
+        # Save component status
+        self.db.save_component(
+            "lib/features/graph/store/graph_data_controller.dart",
+            "COMPLIANT", "COMPLIANT",
+            {"ai_summary": "Comp Summary", "pattern": "Controller"},
+            []
+        )
+        
+        # 2. Call handle_query_file with mocked arguments
+        from main import handle_query_file
+        from project import Workspace
+        import io
+        import sys
+        
+        class MockArgs:
+            path = "lib/features/graph/store/graph_data_controller.dart"
+            methods = False
+            independent_functions = False
+            impl_methods = False
+            classes = False
+            functions = False
+            imports = False
+            include_body = True
+            
+        workspace = Workspace(
+            root_dir=self.temp_dir,
+            db_path=self.db_path,
+            config_path=Path(self.config_path),
+            config=self.config
+        )
+        
+        captured_output = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured_output
+        try:
+            handle_query_file(MockArgs(), workspace, self.db)
+        finally:
+            sys.stdout = old_stdout
+            
+        # 3. Parse and assert the printed structure
+        output_str = captured_output.getvalue()
+        output_data = json.loads(output_str)
+        
+        self.assertIn("component", output_data)
+        self.assertIn("nodes", output_data)
+        
+        comp = output_data["component"]
+        self.assertEqual(comp["filepath"], "lib/features/graph/store/graph_data_controller.dart")
+        self.assertEqual(comp["status"], "COMPLIANT")
+        self.assertEqual(comp["manual_fields"].get("pattern"), "Controller")
+        
+        nodes = output_data["nodes"]
+        self.assertEqual(len(nodes), 1)
+        node_res = nodes[0]
+        self.assertEqual(node_res["id"], nid)
+        self.assertEqual(node_res["layer"], "Application")
+        self.assertEqual(node_res["tier"], 2)
+        self.assertEqual(node_res["ai_summary"], "Test Summary")
+        self.assertEqual(node_res["raw_code"], "class GraphDataController {}")
+
 
 def os_close_fd(fd):
     """Close a file descriptor safely."""
