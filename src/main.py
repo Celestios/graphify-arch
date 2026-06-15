@@ -28,9 +28,9 @@ def load_graph_from_json(root: Path) -> Any:
     if "links" not in raw and "edges" in raw:
         raw = dict(raw, links=raw["edges"])
     try:
-        return json_graph.node_link_graph(raw, edges="links")
+        return json_graph.node_link_graph(raw, directed=True, edges="links")
     except TypeError:
-        return json_graph.node_link_graph(raw)
+        return json_graph.node_link_graph(raw, directed=True)
 
 
 def sync_graph_to_database(database: Database, G) -> None:

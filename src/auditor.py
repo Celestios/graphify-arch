@@ -16,18 +16,25 @@ def audit_architecture_rules(G: nx.MultiDiGraph, ontology: OntologyConfig, root:
         relation = edge_data.get("type") or edge_data.get("relation") or ""
         if relation.lower() not in ["calls", "uses", "references", "implements", "ffibridge", "imports"]:
             continue
-            
-        rel_u_sf = resolve_relative_path(G.nodes[u].get("source_file"), root)
+        
+        # Detect reversed edges: edge's source_file identifies the referencer.
+        # If the source node's file doesn't match, the edge direction is reversed.
+        edge_sf = edge_data.get("source_file", "")
+        u_sf = resolve_relative_path(G.nodes[u].get("source_file"), root)
+        v_sf = resolve_relative_path(G.nodes[v].get("source_file"), root)
+        edge_sf_rel = resolve_relative_path(edge_sf, root) if edge_sf else ""
+
+        src, tgt = u, v
+        if edge_sf_rel and edge_sf_rel == v_sf and edge_sf_rel != u_sf:
+            src, tgt = v, u
+
+        rel_u_sf = resolve_relative_path(G.nodes[src].get("source_file"), root)
         u_fields_cfg = ontology.get_fields_for_file(rel_u_sf)
         
         for field_name, field_config in u_fields_cfg.items():
             if field_config.handler != "dependency_check":
                 continue
                 
-            # Use _src/_tgt for correct direction (preserved from extraction)
-            src = edge_data.get("_src", u)
-            tgt = edge_data.get("_tgt", v)
-            
             src_val = G.nodes[src].get(f"arch_meta_{field_name}")
             tgt_val = G.nodes[tgt].get(f"arch_meta_{field_name}")
             
