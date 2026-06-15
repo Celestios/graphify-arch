@@ -709,8 +709,6 @@ class PluginReportGenerator:
                 copied += 1
             except Exception as e:
                 print(f"warning: failed to copy reference {ref_file.name} to {refs_dst}: {e}", file=sys.stderr)
-        if copied > 0:
-            print(f"  arch references   ->  {refs_dst} ({copied} files)")
 
     @staticmethod
     def write_always_on_prompts(root_path: Path, G, violations: list, ontology):
@@ -959,7 +957,6 @@ Full documentation is available in the `references/` folder alongside this skill
                     print(f"  arch skill section added to {skill_file}")
                 elif content != original_content:
                     skill_file.write_text(content, encoding="utf-8")
-                    print(f"  arch references updated in {skill_file}")
             except Exception as e:
                 print(f"warning: failed to write arch instructions to {skill_file}: {e}", file=sys.stderr)
 
