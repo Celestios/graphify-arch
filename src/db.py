@@ -132,6 +132,7 @@ class Database:
         self.conn.commit()
 
     def set_component_status(self, filepath: str, status: str, violations_msg: str):
+        import sys
         comp = self.get_component(filepath)
         if comp:
             manual_fields = comp.get("manual_fields") or {}

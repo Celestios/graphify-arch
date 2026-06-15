@@ -200,5 +200,129 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(node.semantics.fields.get("pattern"), "Notifier")
         self.assertEqual(node.ai_summary, "Handles graph data")
 
+    def test_set_component_status_rejects_auditor_violation_detected(self):
+        self.db.save_component(
+            filepath="src/main.rs",
+            status="VIOLATION_DETECTED",
+            manual_status=None,
+            manual_fields={},
+            violations=[{"origin": "automated", "rule": "layer_violation", "message": "bad"}]
+        )
+        self.db.set_component_status("src/main.rs", "COMPLIANT", "")
+        comp = self.db.get_component("src/main.rs")
+        self.assertEqual(comp["status"], "VIOLATION_DETECTED")
+
+    def test_set_component_status_allows_manual_violation_detected(self):
+        self.db.save_component(
+            filepath="src/main.rs",
+            status="VIOLATION_DETECTED",
+            manual_status="VIOLATION_DETECTED",
+            manual_fields={},
+            violations=[]
+        )
+        self.db.set_component_status("src/main.rs", "COMPLIANT", "")
+        comp = self.db.get_component("src/main.rs")
+        self.assertEqual(comp["status"], "COMPLIANT")
+
+    def test_set_component_status_on_pending_audit(self):
+        self.db.save_component(
+            filepath="src/main.rs",
+            status="PENDING_AUDIT",
+            manual_status=None,
+            manual_fields={},
+            violations=[]
+        )
+        self.db.set_component_status("src/main.rs", "COMPLIANT", "")
+        comp = self.db.get_component("src/main.rs")
+        self.assertEqual(comp["status"], "COMPLIANT")
+        self.assertEqual(comp["manual_status"], "COMPLIANT")
+
+    def test_set_component_status_bulk_only_updates_metadata(self):
+        from schema import OntologyConfig, DirectoryConfig, FieldConfig
+        manual_cfg = FieldConfig(values=["Facade", "None"], default=None)
+        dir_cfg = DirectoryConfig(manual_fields={"pattern": manual_cfg})
+        ontology = OntologyConfig(directories={"src": dir_cfg})
+
+        self.db.save_component(
+            filepath="src/main.rs",
+            status="VIOLATION_DETECTED",
+            manual_status=None,
+            manual_fields={"pattern": "Facade"},
+            violations=[{"origin": "automated", "rule": "layer_violation", "message": "bad"}]
+        )
+
+        updates = {"src/main.rs": {"pattern": "None"}}
+        self.db.set_component_status_bulk(updates, ontology, Path(self.temp_dir))
+
+        comp = self.db.get_component("src/main.rs")
+        self.assertEqual(comp["status"], "VIOLATION_DETECTED")
+        self.assertEqual(comp["manual_fields"]["pattern"], "None")
+
+    def test_update_violations_respects_manual_status(self):
+        from schema import OntologyConfig
+        ontology = OntologyConfig()
+
+        self.db.save_component(
+            filepath="src/main.rs",
+            status="COMPLIANT",
+            manual_status="COMPLIANT",
+            manual_fields={},
+            violations=[]
+        )
+
+        v = Violation(
+            rule_name="layer_violation",
+            source_id="A", target_id="B",
+            filepath="src/main.rs",
+            start_byte=0, end_byte=10,
+            message="bad"
+        )
+
+        self.db.update_violations_and_statuses([v], ontology, Path(self.temp_dir))
+        comp = self.db.get_component("src/main.rs")
+        self.assertEqual(comp["status"], "COMPLIANT")
+        self.assertEqual(comp["manual_status"], "COMPLIANT")
+
+    def test_update_violations_sets_violation_detected_when_no_manual(self):
+        from schema import OntologyConfig
+        ontology = OntologyConfig()
+
+        self.db.save_component(
+            filepath="src/main.rs",
+            status="PENDING_AUDIT",
+            manual_status=None,
+            manual_fields={},
+            violations=[]
+        )
+
+        v = Violation(
+            rule_name="layer_violation",
+            source_id="A", target_id="B",
+            filepath="src/main.rs",
+            start_byte=0, end_byte=10,
+            message="bad"
+        )
+
+        self.db.update_violations_and_statuses([v], ontology, Path(self.temp_dir))
+        comp = self.db.get_component("src/main.rs")
+        self.assertEqual(comp["status"], "VIOLATION_DETECTED")
+        self.assertIsNone(comp["manual_status"])
+
+    def test_update_violations_sets_compliant_when_no_violations(self):
+        from schema import OntologyConfig
+        ontology = OntologyConfig()
+
+        self.db.save_component(
+            filepath="src/main.rs",
+            status="VIOLATION_DETECTED",
+            manual_status=None,
+            manual_fields={},
+            violations=[]
+        )
+
+        self.db.update_violations_and_statuses([], ontology, Path(self.temp_dir))
+        comp = self.db.get_component("src/main.rs")
+        self.assertEqual(comp["status"], "COMPLIANT")
+
 if __name__ == "__main__":
     unittest.main()

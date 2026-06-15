@@ -101,5 +101,98 @@ class TestAuditor(unittest.TestCase):
         self.assertEqual(violations[0].source_id, "A")
         self.assertEqual(violations[0].target_id, "B")
 
+    def test_audit_reversed_edge_detected_by_source_file(self):
+        rule = FieldRuleConfig(
+            source="Domain",
+            target="Presentation",
+            message="Domain must not depend on Presentation",
+            severity="error"
+        )
+        layer_cfg = FieldConfig(
+            values=["Domain", "Presentation"],
+            default="Domain",
+            handler="dependency_check",
+            rules=[rule]
+        )
+        dir_cfg = DirectoryConfig(automatic_fields={"layer": layer_cfg})
+        ontology = OntologyConfig(directories={".": dir_cfg})
+
+        G = nx.MultiDiGraph()
+        G.add_node("A", source_file="src/a.dart", arch_meta_layer="Domain")
+        G.add_node("B", source_file="src/b.dart", arch_meta_layer="Presentation")
+        G.add_edge("A", "B", type="references", source_file="src/b.dart")
+
+        violations = audit_architecture_rules(G, ontology, Path("src"))
+        self.assertEqual(len(violations), 0)
+
+    def test_audit_edge_source_file_mismatch_swaps_direction(self):
+        rule = FieldRuleConfig(
+            source="Presentation",
+            target="Domain",
+            message="Presentation must not depend on Domain",
+            severity="error"
+        )
+        layer_cfg = FieldConfig(
+            values=["Domain", "Presentation"],
+            default="Domain",
+            handler="dependency_check",
+            rules=[rule]
+        )
+        dir_cfg = DirectoryConfig(automatic_fields={"layer": layer_cfg})
+        ontology = OntologyConfig(directories={".": dir_cfg})
+
+        G = nx.MultiDiGraph()
+        G.add_node("A", source_file="src/a.dart", arch_meta_layer="Domain")
+        G.add_node("B", source_file="src/b.dart", arch_meta_layer="Presentation")
+        G.add_edge("A", "B", type="references", source_file="src/b.dart")
+
+        violations = audit_architecture_rules(G, ontology, Path("src"))
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].source_id, "B")
+        self.assertEqual(violations[0].target_id, "A")
+
+    def test_audit_no_violation_when_edge_direction_correct(self):
+        rule = FieldRuleConfig(
+            source="Domain",
+            target="Presentation",
+            message="Domain must not depend on Presentation",
+            severity="error"
+        )
+        layer_cfg = FieldConfig(
+            values=["Domain", "Presentation"],
+            default="Domain",
+            handler="dependency_check",
+            rules=[rule]
+        )
+        dir_cfg = DirectoryConfig(automatic_fields={"layer": layer_cfg})
+        ontology = OntologyConfig(directories={".": dir_cfg})
+
+        G = nx.MultiDiGraph()
+        G.add_node("A", source_file="src/a.dart", arch_meta_layer="Presentation")
+        G.add_node("B", source_file="src/b.dart", arch_meta_layer="Domain")
+        G.add_edge("A", "B", type="references", source_file="src/a.dart")
+
+        violations = audit_architecture_rules(G, ontology, Path("src"))
+        self.assertEqual(len(violations), 0)
+
+    def test_audit_skips_non_dependency_relations(self):
+        rule = FieldRuleConfig(
+            source="A", target="B", message="bad", severity="error"
+        )
+        cfg = FieldConfig(
+            values=["A", "B"], default="A",
+            handler="dependency_check", rules=[rule]
+        )
+        dir_cfg = DirectoryConfig(automatic_fields={"layer": cfg})
+        ontology = OntologyConfig(directories={".": dir_cfg})
+
+        G = nx.MultiDiGraph()
+        G.add_node("X", source_file="x.rs", arch_meta_layer="A")
+        G.add_node("Y", source_file="y.rs", arch_meta_layer="B")
+        G.add_edge("X", "Y", type="contains")
+
+        violations = audit_architecture_rules(G, ontology, Path("."))
+        self.assertEqual(len(violations), 0)
+
 if __name__ == "__main__":
     unittest.main()
