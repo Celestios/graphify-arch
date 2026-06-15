@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graphify-arch"
-version = "0.1.13"
+version = "0.1.14"
 description = "Architecture enforcement plugin for graphify"
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -358,16 +358,8 @@ Config:
             if gp.exists():
                 import networkx as nx
                 from networkx.readwrite import json_graph
-                with open(gp, "r", encoding="utf-8") as f:
-                    _raw = json.load(f)
-                if "links" not in _raw and "edges" in _raw:
-                    _raw = dict(_raw, links=_raw["edges"])
-                try:
-                    G = json_graph.node_link_graph(_raw, directed=True, edges="links")
-                except TypeError:
-                    G = json_graph.node_link_graph(_raw, directed=True)
-
                 from utils import resolve_relative_path
+
                 updated_filepaths = set()
                 for raw_key in payload:
                     fp = resolve_relative_path(Path(raw_key).resolve(), root)
@@ -377,19 +369,27 @@ Config:
                         if k.endswith(fp) or fp.endswith(k):
                             updated_filepaths.add(k)
 
+                for fp in updated_filepaths:
+                    cursor = db.conn.cursor()
+                    cursor.execute("DELETE FROM component_violations WHERE filepath = ?", (fp,))
+
+                with open(gp, "r", encoding="utf-8") as f:
+                    _raw = json.load(f)
+                if "links" not in _raw and "edges" in _raw:
+                    _raw = dict(_raw, links=_raw["edges"])
+                try:
+                    G = json_graph.node_link_graph(_raw, directed=True, edges="links")
+                except TypeError:
+                    G = json_graph.node_link_graph(_raw, directed=True)
+
                 for node_id, data in G.nodes(data=True):
                     node_file = resolve_relative_path(data.get("source_file", ""), root)
                     if node_file in updated_filepaths:
                         data.pop("arch_meta_requires_audit", None)
 
-                from plugins import discover_plugins, run_hook
-                plugins = discover_plugins(root)
-                G = run_hook(plugins, "on_post_build", G, {}, root)
-
-                from auditor import audit_architecture_rules
-                violations = audit_architecture_rules(G, ontology, root)
-                db.update_violations_and_statuses(violations, ontology, root, G)
-                db.sync_graph_metadata(G, root)
+                data = json_graph.node_link_data(G, edges="links")
+                with open(gp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
 
             db.conn.commit()
             db.sync_to_graph_json(root, ontology)
