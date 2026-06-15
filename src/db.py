@@ -136,9 +136,15 @@ class Database:
         if comp:
             manual_fields = comp.get("manual_fields") or {}
             existing_violations = comp.get("violations") or []
+            current_manual_status = comp.get("manual_status")
         else:
             manual_fields = {}
             existing_violations = []
+            current_manual_status = None
+
+        if current_manual_status is None and comp and comp.get("status") == "VIOLATION_DETECTED":
+            print(f"warning: {filepath} has auditor-set VIOLATION_DETECTED. Only code/ontology fixes can change it.", file=sys.stderr)
+            return
 
         filtered_violations = [v for v in existing_violations if v.get("origin") != "manual"]
         if violations_msg and status == "VIOLATION_DETECTED":
@@ -168,26 +174,14 @@ class Database:
 
             if comp:
                 manual_fields = comp.get("manual_fields") or {}
-                existing_violations = comp.get("violations") or []
                 ast_hash = comp.get("ast_hash")
+                status = comp.get("status") or "PENDING_AUDIT"
+                manual_status = comp.get("manual_status")
             else:
                 manual_fields = {}
-                existing_violations = []
                 ast_hash = None
-
-            status = entry_data.get("status")
-            violations_raw = entry_data.get("violations", "")
-            if isinstance(violations_raw, list):
-                violations_msg = " | ".join(str(v) for v in violations_raw)
-            else:
-                violations_msg = str(violations_raw) if violations_raw is not None else ""
-
-            filtered_violations = [v for v in existing_violations if v.get("origin") != "manual"]
-            if violations_msg and status == "VIOLATION_DETECTED":
-                filtered_violations.append({
-                    "origin": "manual",
-                    "message": violations_msg
-                })
+                status = "PENDING_AUDIT"
+                manual_status = None
 
             dir_fields = ontology.get_manual_fields_for_file(matched_key)
             for k, v in entry_data.items():
@@ -199,8 +193,7 @@ class Database:
                         print(f"warning: value '{v}' for manual field '{k}' is not allowed. Using default '{field_cfg.default}'", file=sys.stderr)
                         manual_fields[k] = field_cfg.default
 
-            self._upsert_component(matched_key, status, status, manual_fields, ast_hash)
-            self._set_violations(matched_key, filtered_violations)
+            self._upsert_component(matched_key, status, manual_status, manual_fields, ast_hash)
 
         self.conn.commit()
         self.sync_to_graph_json(root, ontology)

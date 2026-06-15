@@ -148,7 +148,7 @@ Config:
             ontology = plugin_instance.load_ontology(root)
             violations = audit_architecture_rules(G, ontology, root)
             
-            # Load database and update violations/statuses in db.json
+            # Build violation output directly from auditor results
             from project import ConfigLoader
             from db import Database
             file_level_violations = []
@@ -158,62 +158,35 @@ Config:
                 db = Database(str(db_path))
                 db.update_violations_and_statuses(violations, ontology, root, G)
                 db.sync_graph_metadata(G, root)
-                
-                components = db.get_all_components()
-                for filepath, comp in sorted(components.items()):
-                    status = comp.get("status")
-                    if status in ("VIOLATION_DETECTED", "PENDING_AUDIT"):
-                        resolved_vlist = []
-                        for raw_v in (comp.get("violations") or []):
-                            v = dict(raw_v)
-                            src = v.get("source_node")
-                            tgt = v.get("target_node")
-                            if src and tgt:
-                                src_file = G.nodes[src].get("source_file") if src in G.nodes else None
-                                tgt_file = G.nodes[tgt].get("source_file") if tgt in G.nodes else None
-                                if src_file:
-                                    src_file = resolve_relative_path(src_file, root)
-                                if tgt_file:
-                                    tgt_file = resolve_relative_path(tgt_file, root)
-                                v["source_file"] = src_file if src_file else src
-                                v["target_file"] = tgt_file if tgt_file else tgt
-                                v.pop("source_node", None)
-                                v.pop("target_node", None)
-                            resolved_vlist.append(v)
-                        
-                        file_level_violations.append({
-                            "filepath": filepath,
-                            "status": status,
-                            "violations": resolved_vlist
-                        })
             except Exception as e:
-                print(f"warning: failed to update/query database: {e}", file=sys.stderr)
-                by_file = {}
-                for v in violations:
-                    fpath = resolve_relative_path(v.filepath, root)
-                    src = v.source_id
-                    tgt = v.target_id
-                    src_file = G.nodes[src].get("source_file") if src in G.nodes else None
-                    tgt_file = G.nodes[tgt].get("source_file") if tgt in G.nodes else None
-                    if src_file:
-                        src_file = resolve_relative_path(src_file, root)
-                    if tgt_file:
-                        tgt_file = resolve_relative_path(tgt_file, root)
-                        
-                    by_file.setdefault(fpath, []).append({
-                        "origin": "automated",
-                        "rule": v.rule_name,
-                        "message": v.message,
-                        "source_file": src_file if src_file else src,
-                        "target_file": tgt_file if tgt_file else tgt,
-                        "filepath": fpath
+                print(f"warning: failed to update database: {e}", file=sys.stderr)
+
+            by_file = {}
+            for v in violations:
+                fpath = resolve_relative_path(v.filepath, root)
+                src = v.source_id
+                tgt = v.target_id
+                src_file = G.nodes[src].get("source_file") if src in G.nodes else None
+                tgt_file = G.nodes[tgt].get("source_file") if tgt in G.nodes else None
+                if src_file:
+                    src_file = resolve_relative_path(src_file, root)
+                if tgt_file:
+                    tgt_file = resolve_relative_path(tgt_file, root)
+
+                by_file.setdefault(fpath, []).append({
+                    "origin": "automated",
+                    "rule": v.rule_name,
+                    "message": v.message,
+                    "source_file": src_file if src_file else src,
+                    "target_file": tgt_file if tgt_file else tgt,
+                    "filepath": fpath
                     })
-                for filepath, file_v in sorted(by_file.items()):
-                    file_level_violations.append({
-                        "filepath": filepath,
-                        "status": "VIOLATION_DETECTED",
-                        "violations": file_v
-                    })
+            for filepath, file_v in sorted(by_file.items()):
+                file_level_violations.append({
+                    "filepath": filepath,
+                    "status": "VIOLATION_DETECTED",
+                    "violations": file_v
+                })
                 
             analysis = {"violations": file_level_violations}
             print(json.dumps(analysis, indent=2))
@@ -379,7 +352,6 @@ Config:
 
                 for fp in updated_filepaths:
                     cursor = db.conn.cursor()
-                    cursor.execute("DELETE FROM component_violations WHERE filepath = ?", (fp,))
                     manifest_entry = manifest_data.get(fp)
                     curr_hash = manifest_entry.get("ast_hash") if manifest_entry else None
                     if curr_hash:
