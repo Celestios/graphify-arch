@@ -354,6 +354,14 @@ Config:
             
             db.set_component_status_bulk(payload, ontology, root)
 
+            manifest_path = root / "graphify-out" / "manifest.json"
+            manifest_data = {}
+            if manifest_path.exists():
+                try:
+                    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
             gp = root / "graphify-out" / "graph.json"
             if gp.exists():
                 import networkx as nx
@@ -372,6 +380,10 @@ Config:
                 for fp in updated_filepaths:
                     cursor = db.conn.cursor()
                     cursor.execute("DELETE FROM component_violations WHERE filepath = ?", (fp,))
+                    manifest_entry = manifest_data.get(fp)
+                    curr_hash = manifest_entry.get("ast_hash") if manifest_entry else None
+                    if curr_hash:
+                        cursor.execute("UPDATE components SET ast_hash = ? WHERE filepath = ?", (curr_hash, fp))
 
                 with open(gp, "r", encoding="utf-8") as f:
                     _raw = json.load(f)
